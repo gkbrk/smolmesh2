@@ -1,0 +1,32 @@
+[package]
+name = "smolmesh2"
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[dependencies]
+json = "0.12.4"
+lazy_static = "1.4.0"
+crossbeam = "0.8.4"
+chrono = "0.4.31"
+socket2 = { version = "0.5.5", features = ["all"] }
+libc = "0.2.152"
+libloading = "0.8.1"
+
+[dependencies.nix]
+version = "0.27.1"
+features = ["net", "poll"]
+
+[dependencies.windows-sys]
+version = "0.52.0"
+features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_System_Threading",
+]

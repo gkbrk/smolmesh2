@@ -1,0 +1,7 @@
+.idea/
+.vscode/
+Cargo.lock
+configs/
+*.dll
+deploy.sh
+target/
