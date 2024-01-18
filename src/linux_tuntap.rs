@@ -2,22 +2,18 @@ pub struct TunInterface {
   fd: i32,
 }
 
-#[cfg(target_arch = "x86_64")]
 unsafe fn nix_libc_open(path: &str) -> i32 {
   // Copy to null-terminated string
   let mut path = path.to_owned();
   path.push('\0');
 
-  libc::open(path.as_ptr() as *const i8, libc::O_RDWR)
-}
+  #[cfg(target_arch = "x86_64")]
+  let path = path.as_ptr() as *const i8;
 
-#[cfg(target_arch = "aarch64")]
-unsafe fn nix_libc_open(path: &str) -> i32 {
-  // Copy to null-terminated string
-  let mut path = path.to_owned();
-  path.push('\0');
+  #[cfg(target_arch = "aarch64")]
+  let path = path.as_ptr() as *const u8;
 
-  nix::libc::open(path.as_ptr() as *const u8, nix::libc::O_RDWR)
+  libc::open(path, libc::O_RDWR)
 }
 
 impl TunInterface {
