@@ -103,6 +103,21 @@ fn handle_connection(node_name: String, conn: std::net::TcpStream) -> Result<()>
 
       std::thread::sleep(std::time::Duration::from_secs(2));
     }
+    ("GET", "/etc/hosts") => {
+      wr("HTTP/1.1 200 OK\r\n")?;
+      wr("Connection: close\r\n")?;
+      wr("Content-Type: text/plain\r\n")?;
+      wr("\r\n")?;
+
+      wr("# smolmesh2 known hosts\n\n")?;
+
+      for (node, _) in crate::recently_seen_nodes::get().recent_list() {
+        let addr = crate::ipv6_addr::Addr::from_node_name(&node).to_ipv6();
+        wr(&format!("{} {}\n", addr, node))?;
+      }
+
+      wr("\n# end of smolmesh2 known hosts\n")?;
+    }
     (&_, &_) => {
       writer.write_all(b"HTTP/1.1 404 Not Found\r\n").unwrap();
       writer.write_all(b"Connection: close\r\n").unwrap();
