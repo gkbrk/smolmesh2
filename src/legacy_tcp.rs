@@ -1,5 +1,4 @@
 use std::io::{Read, Write};
-use std::os::fd::AsRawFd;
 
 use crate::all_senders;
 
@@ -80,12 +79,16 @@ impl KeystreamGen {
   }
 }
 
-fn poll_readable(fd: libc::c_int, timeout_ms: usize) -> DSSResult<()> {
+#[cfg(unix)]
+fn poll_readable(sock: &socket2::Socket, timeout_ms: usize) -> DSSResult<()> {
+  use std::os::fd::AsRawFd;
+
   let read_or_error = nix::poll::PollFlags::POLLIN
     | nix::poll::PollFlags::POLLERR
     | nix::poll::PollFlags::POLLHUP
     | nix::poll::PollFlags::POLLNVAL;
 
+  let fd = sock.as_raw_fd();
   let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
   let pollfd = nix::poll::PollFd::new(&fd, read_or_error);
   let res = nix::poll::poll(&mut [pollfd], timeout_ms as i32)?;
@@ -97,13 +100,33 @@ fn poll_readable(fd: libc::c_int, timeout_ms: usize) -> DSSResult<()> {
   Ok(())
 }
 
+#[cfg(windows)]
+fn poll_readable(sock: &socket2::Socket, timeout_ms: usize) -> DSSResult<()> {
+  use std::{borrow::BorrowMut, os::windows::io::AsRawSocket};
+
+  let mut pollfd = windows_sys::Win32::Networking::WinSock::WSAPOLLFD {
+    fd: sock.as_raw_socket().try_into()?,
+    events: windows_sys::Win32::Networking::WinSock::POLLIN,
+    revents: 0,
+  };
+
+  let res = unsafe { windows_sys::Win32::Networking::WinSock::WSAPoll(pollfd.borrow_mut(), 1, timeout_ms as i32) };
+
+  if res == 0 {
+    return Err("Timeout".into());
+  } else if res < 0 {
+    let error_code = unsafe { windows_sys::Win32::Networking::WinSock::WSAGetLastError() };
+    return Err(format!("WSAPoll failed with error code {}", error_code).into());
+  }
+
+  Ok(())
+}
+
 fn readexact_timeout(sock: &mut socket2::Socket, buf: &mut [u8], timeout_ms: usize) -> DSSResult<()> {
   let mut read = 0;
 
-  let fd = sock.as_raw_fd();
-
   while read < buf.len() {
-    poll_readable(fd, timeout_ms)?;
+    poll_readable(sock, timeout_ms)?;
     let res = sock.read(&mut buf[read..])?;
     read += res;
 
@@ -232,7 +255,7 @@ fn connect_impl(
       let mut keystream = KeystreamGen::new(&recv_enc_key);
 
       let mut read_exact = |buf: &mut [u8]| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if let Err(_) = readexact_timeout(&mut sock, buf, 30000) {
+        if readexact_timeout(&mut sock, buf, 30000).is_err() {
           sock.shutdown(std::net::Shutdown::Both)?;
           return Err("read_exact failed".into());
         }
