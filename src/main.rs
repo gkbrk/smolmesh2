@@ -116,16 +116,24 @@ fn run_meshnode(args: &mut VecDeque<String>) {
 
   loop {
     let (data, _sender) = receiver.recv().unwrap();
+
+    // First 8 bytes are the milliseconds since epoch
+    let ms = u64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]);
+
+    // Ignore packets older than 3 minutes
+    {
+      let ignore_after = 1000 * 60 * 3;
+      let current = millis();
+      if current.abs_diff(ms) > ignore_after {
+        continue;
+      }
+    }
+
     if seen_packets.contains(&data) {
       continue;
     }
     seen_packets.add(&data);
     let orig_data = data.clone();
-
-    // First 8 bytes are the milliseconds since epoch
-    let ms = u64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]);
-
-    // TODO: Reject packets that are older than 3 minutes
 
     let cmd = &data[8];
     let data = &data[9..];
