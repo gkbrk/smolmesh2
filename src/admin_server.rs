@@ -58,7 +58,7 @@ fn handle_connection(node_name: String, conn: std::net::TcpStream) -> Result<()>
         wr(&format!("<td>{}</td>", node))?;
         wr(&format!(
           "<td>{}</td>",
-          crate::ipv6_addr::Addr::from_node_name(&node).to_ipv6()
+          crate::ip_addr::IpAddr::from_node_name(&node)
         ))?;
         wr(&format!(
           "<td>{} seconds ago</td>",
@@ -98,7 +98,8 @@ fn handle_connection(node_name: String, conn: std::net::TcpStream) -> Result<()>
 
         resp.extend_from_slice(format!("{} ", node_name).as_bytes());
 
-        crate::all_senders::get().send_to_fastest(crate::ipv6_addr::Addr::from_node_name(&node), resp);
+        let addr = crate::ip_addr::IpAddr::from_node_name(&node);
+        crate::all_senders::get().send_to_fastest(addr, resp);
       }
 
       std::thread::sleep(std::time::Duration::from_secs(2));
@@ -112,7 +113,7 @@ fn handle_connection(node_name: String, conn: std::net::TcpStream) -> Result<()>
       wr("# smolmesh2 known hosts\n\n")?;
 
       for (node, _) in crate::recently_seen_nodes::get().recent_list() {
-        let addr = crate::ipv6_addr::Addr::from_node_name(&node).to_ipv6();
+        let addr = crate::ip_addr::IpAddr::from_node_name(&node);
         wr(&format!("{} {}\n", addr, node))?;
       }
 

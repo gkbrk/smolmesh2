@@ -54,16 +54,9 @@ impl TunInterface {
     cmd.spawn().unwrap().wait().unwrap();
   }
 
-  pub fn set_ip6(&self, addr: &crate::ipv6_addr::Addr, prefix_len: u8) {
-    let formatted = addr.to_ipv6();
-
-    let mut cmd = String::new();
-    cmd.push_str("ip -6 addr add ");
-    cmd.push_str(&formatted);
-    cmd.push('/');
-    cmd.push_str(&prefix_len.to_string());
-    // TODO: Get interface name from somewhere
-    cmd.push_str(" dev smolmesh1");
+  pub fn set_ip6(&self, addr: &crate::ip_addr::IpAddr, prefix_len: u8) {
+    // TODO: Get the name smolmesh1 from somewhere
+    let cmd = format!("ip -6 addr add {}/{} dev smolmesh1", addr, prefix_len);
 
     let mut proc = std::process::Command::new("sh");
     proc.arg("-c");
@@ -87,7 +80,7 @@ impl TunInterface {
           packet.set_len(amount as usize);
         }
 
-        let addr = crate::ipv6_addr::Addr::from_buf(&packet[24..40]);
+        let addr = crate::ip_addr::IpAddr::ipv6_from_buf(&packet[24..40]);
 
         let mut netpacket = Vec::new();
         netpacket.extend_from_slice(&crate::millis().to_le_bytes());

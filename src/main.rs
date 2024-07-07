@@ -5,7 +5,6 @@ use std::{collections::VecDeque, io::Write};
 
 mod admin_server;
 mod all_senders;
-mod ipv6_addr;
 mod legacy_tcp;
 #[cfg(unix)]
 mod linux_tuntap;
@@ -13,6 +12,7 @@ mod raw_speck;
 mod recently_seen_nodes;
 mod rng;
 mod seen_packets;
+mod ip_addr;
 mod speck;
 #[cfg(windows)]
 mod windows_tuntap;
@@ -41,7 +41,7 @@ fn run_meshnode(args: &mut VecDeque<String>) {
   });
 
   let node_name = config["node_name"].as_str().unwrap().to_owned();
-  let node_ip = ipv6_addr::Addr::from_node_name(&node_name);
+  let node_ip = crate::ip_addr::IpAddr::from_node_name(&node_name);
 
   admin_server::start_admin_server(node_name.clone(), 8765);
 
@@ -144,7 +144,7 @@ fn run_meshnode(args: &mut VecDeque<String>) {
     match cmd {
       0 => {
         if let Ok(packet_node_name) = std::str::from_utf8(data) {
-          let addr = ipv6_addr::Addr::from_node_name(packet_node_name);
+          let addr = crate::ip_addr::IpAddr::from_node_name(packet_node_name);
           all_senders.add_fastest_to(ms, addr, _sender);
           recent.set_alive(packet_node_name);
         }
@@ -153,7 +153,7 @@ fn run_meshnode(args: &mut VecDeque<String>) {
       }
       3 => {
         // IPv6 packet
-        let target_addr = ipv6_addr::Addr::from_buf(&data[24..40]);
+        let target_addr = crate::ip_addr::IpAddr::ipv6_from_buf(&data[24..40]);
 
         for tun_sender in &tun_senders {
           tun_sender.send(data.to_vec()).unwrap();
@@ -168,12 +168,12 @@ fn run_meshnode(args: &mut VecDeque<String>) {
         let target_len = data[0] as usize;
         let target = &data[1..1 + target_len];
         let target = std::str::from_utf8(target).unwrap_or("tgt");
-        let target_addr = ipv6_addr::Addr::from_node_name(target);
+        let target_addr = crate::ip_addr::IpAddr::from_node_name(target);
 
         let src_len = data[1 + target_len] as usize;
         let src = &data[1 + target_len + 1..1 + target_len + 1 + src_len];
         let src = std::str::from_utf8(src).unwrap_or("src");
-        let src_addr = ipv6_addr::Addr::from_node_name(src);
+        let src_addr = crate::ip_addr::IpAddr::from_node_name(src);
 
         let mut path = Vec::new();
         path.extend_from_slice(&data[1 + target_len + 1 + src_len..]);
@@ -204,7 +204,7 @@ fn run_meshnode(args: &mut VecDeque<String>) {
         let src_len = data[0] as usize;
         let src = &data[1..1 + src_len];
         let src = std::str::from_utf8(src).unwrap_or("src");
-        let src_addr = ipv6_addr::Addr::from_node_name(src);
+        let src_addr = crate::ip_addr::IpAddr::from_node_name(src);
 
         let target_len = data[1 + src_len] as usize;
         let target = &data[1 + src_len + 1..1 + src_len + 1 + target_len];
@@ -227,9 +227,9 @@ fn run_meshnode(args: &mut VecDeque<String>) {
 
 fn run_name_to_ipv6(args: &mut VecDeque<String>) {
   let node_name = args.pop_front().unwrap();
-  let ipv6 = ipv6_addr::Addr::from_node_name(&node_name);
+  let ipv6 = ip_addr::IpAddr::from_node_name(&node_name);
 
-  println!("{}", ipv6.to_ipv6());
+  println!("{}", ipv6);
 }
 
 fn main() {
