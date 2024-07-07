@@ -37,12 +37,12 @@ impl AllSenders {
     let fastest_to_address = self.fastest_to_address.read().unwrap();
 
     if let Some((_, sender)) = fastest_to_address.get(&addr) {
-      if sender.send(data.clone()).is_ok() {
-        return;
+      if let Err(x) = sender.send(data) {
+        println!("Error sending to fastest: {:?}", x);
       }
+    } else {
+      self.send_to_random(data);
     }
-
-    self.send_to_random(data.clone());
   }
 
   pub fn send_to_random(&self, data: Vec<u8>) {

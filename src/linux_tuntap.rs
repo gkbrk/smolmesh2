@@ -81,21 +81,39 @@ impl TunInterface {
     std::thread::spawn(move || {
       let all_senders = crate::all_senders::get();
       loop {
-        let mut packet = Vec::with_capacity(2048);
+        let mut packet = Vec::<u8>::with_capacity(2048);
+
+        let amount = unsafe {
+          match libc::read(fd, packet.as_mut_ptr().cast(), packet.capacity() as usize) {
+            -1 => {
+              println!("Error reading from tun: {}", std::io::Error::last_os_error());
+              continue;
+            }
+            0 => break,
+            x => x,
+          }
+        };
 
         unsafe {
-          let amount = libc::read(fd, packet.as_mut_ptr() as *mut libc::c_void, packet.capacity());
-          assert!(amount.is_positive());
           packet.set_len(amount as usize);
         }
 
-        let addr = crate::ip_addr::IpAddr::ipv6_from_buf(&packet[24..40]);
+        let ip_version = (packet[0] & 0b11110000) >> 4;
+
+        let target_addr = match (ip_version, packet.len()) {
+          (4, 20..) => crate::ip_addr::IpAddr::ipv4_from_buf(&packet[16..20]),
+          (6, 40..) => crate::ip_addr::IpAddr::ipv6_from_buf(&packet[24..40]),
+          _ => {
+            println!("Invalid IP version and packet length: {} {}", ip_version, packet.len());
+            continue;
+          }
+        };
 
         let mut netpacket = Vec::new();
         netpacket.extend_from_slice(&crate::millis().to_le_bytes());
         netpacket.push(3);
         netpacket.extend_from_slice(&packet);
-        all_senders.send_to_fastest(addr, netpacket);
+        all_senders.send_to_fastest(target_addr, netpacket);
       }
     });
 
