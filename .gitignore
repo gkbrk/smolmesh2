@@ -2,6 +2,8 @@
 .vscode/
 Cargo.lock
 configs/
+autoconfigs/
 *.dll
 deploy.sh
+deploy.py
 target/
