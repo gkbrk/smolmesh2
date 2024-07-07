@@ -151,6 +151,26 @@ fn run_meshnode(args: &mut VecDeque<String>) {
 
         all_senders.send_all(orig_data.clone());
       }
+      1 => {
+        // Tracer packet that means "I handle this IPv6 address"
+        if data.len() != 16 {
+          println!("Invalid IPv6 address length");
+          continue;
+        }
+        let addr = crate::ip_addr::IpAddr::ipv6_from_buf(data);
+        all_senders.add_fastest_to(ms, addr, _sender);
+        all_senders.send_all(orig_data.clone());
+      }
+      2 => {
+        // Tracer packet that means "I handle this IPv4 address"
+        if data.len() != 4 {
+          println!("Invalid IPv4 address length");
+          continue;
+        }
+        let addr = crate::ip_addr::IpAddr::ipv4_from_buf(data);
+        all_senders.add_fastest_to(ms, addr, _sender);
+        all_senders.send_all(orig_data.clone());
+      }
       3 => {
         // IPv6 packet
         let target_addr = crate::ip_addr::IpAddr::ipv6_from_buf(&data[24..40]);

@@ -1,4 +1,4 @@
-pub struct TunInterface {
+pub(crate) struct TunInterface {
   fd: i32,
 }
 
@@ -17,7 +17,7 @@ unsafe fn nix_libc_open(path: &str) -> i32 {
 }
 
 impl TunInterface {
-  pub fn open(ifname: &str) -> Self {
+  pub(crate) fn open(ifname: &str) -> Self {
     let fd: i32;
 
     unsafe {
@@ -43,7 +43,7 @@ impl TunInterface {
     Self { fd }
   }
 
-  pub fn bring_interface_up(&self) {
+  pub(crate) fn bring_interface_up(&self) {
     let mut cmd = std::process::Command::new("ip");
     cmd.arg("link");
     cmd.arg("set");
@@ -54,7 +54,7 @@ impl TunInterface {
     cmd.spawn().unwrap().wait().unwrap();
   }
 
-  pub fn set_ip6(&self, addr: &crate::ip_addr::IpAddr, prefix_len: u8) {
+  pub(crate) fn set_ip6(&self, addr: &crate::ip_addr::IpAddr, prefix_len: u8) {
     // TODO: Get the name smolmesh1 from somewhere
     let cmd = format!("ip -6 addr add {}/{} dev smolmesh1", addr, prefix_len);
 
@@ -65,7 +65,7 @@ impl TunInterface {
     proc.spawn().unwrap().wait().unwrap();
   }
 
-  pub fn run(&self) -> crossbeam::channel::Sender<Vec<u8>> {
+  pub(crate) fn run(&self) -> crossbeam::channel::Sender<Vec<u8>> {
     let fd = self.fd;
 
     // tun -> network

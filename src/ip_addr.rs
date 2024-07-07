@@ -1,13 +1,24 @@
 use std::fmt::Display;
 
 #[derive(Eq, Hash, PartialEq, Debug, Copy, Clone)]
-pub enum IpAddr {
+pub(crate) enum IpAddr {
   V4(u8, u8, u8, u8),
   V6(u8, u8, u8, u8, u8, u8, u8, u8, u8, u8, u8, u8, u8, u8, u8, u8),
 }
 
 impl IpAddr {
-  pub fn ipv6_from_buf(buf: &[u8]) -> Self {
+  pub(crate) fn ipv4_from_buf(buf: &[u8]) -> Self {
+    assert_eq!(buf.len(), 4);
+
+    let a = buf[0];
+    let b = buf[1];
+    let c = buf[2];
+    let d = buf[3];
+
+    IpAddr::V4(a, b, c, d)
+  }
+
+  pub(crate) fn ipv6_from_buf(buf: &[u8]) -> Self {
     assert_eq!(buf.len(), 16);
 
     let a = buf[0];
@@ -30,7 +41,7 @@ impl IpAddr {
     IpAddr::V6(a, b, c, d, e, g, h, i, j, k, l, m, n, o, p, q)
   }
 
-  pub fn from_node_name(name: &str) -> Self {
+  pub(crate) fn from_node_name(name: &str) -> Self {
     let mut a: u64 = 69;
     let mut b: u64 = name.len() as u64;
 
