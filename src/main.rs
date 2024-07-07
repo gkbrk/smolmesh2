@@ -5,6 +5,7 @@ use std::{collections::VecDeque, io::Write};
 
 mod admin_server;
 mod all_senders;
+mod ip_addr;
 mod legacy_tcp;
 #[cfg(unix)]
 mod linux_tuntap;
@@ -12,7 +13,6 @@ mod raw_speck;
 mod recently_seen_nodes;
 mod rng;
 mod seen_packets;
-mod ip_addr;
 mod speck;
 #[cfg(windows)]
 mod windows_tuntap;
@@ -271,6 +271,36 @@ fn main() {
     }
     "name-to-ipv6" => {
       run_name_to_ipv6(&mut args);
+    }
+    "make-random-ipv4" => {
+      let addr = crate::ip_addr::IpAddr::V4(
+        (rng::u64() & 0xFF) as u8,
+        (rng::u64() & 0xFF) as u8,
+        (rng::u64() & 0xFF) as u8,
+        (rng::u64() & 0xFF) as u8,
+      );
+      println!("{}", addr);
+    }
+    "make-random-ipv6" => {
+      let addr = crate::ip_addr::IpAddr::V6(
+        0xfd, 0x00,
+        (rng::u64() & 0xFF) as u8,
+        (rng::u64() & 0xFF) as u8,
+        (rng::u64() & 0xFF) as u8,
+        (rng::u64() & 0xFF) as u8,
+        (rng::u64() & 0xFF) as u8,
+        (rng::u64() & 0xFF) as u8,
+        (rng::u64() & 0xFF) as u8,
+        (rng::u64() & 0xFF) as u8,
+        (rng::u64() & 0xFF) as u8,
+        (rng::u64() & 0xFF) as u8,
+        (rng::u64() & 0xFF) as u8,
+        (rng::u64() & 0xFF) as u8,
+        (rng::u64() & 0xFF) as u8,
+        (rng::u64() & 0xFF) as u8,
+      );
+
+      println!("{}", addr);
     }
     x => {
       println!("Unknown command '{}'", x);
