@@ -101,6 +101,7 @@ fn run_meshnode(args: &mut VecDeque<String>) {
   if let Some(true) = config["linux_tuntap"].as_bool() {
     let interface_name = "smolmesh1";
     let tun = linux_tuntap::TunInterface::open(interface_name);
+    tun.bring_interface_up();
     tun.set_ip6(&node_ip, 8);
     let tun_sender = tun.run();
     tun_senders.push(tun_sender);

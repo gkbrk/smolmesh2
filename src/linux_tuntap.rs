@@ -43,8 +43,7 @@ impl TunInterface {
     Self { fd }
   }
 
-  pub fn set_ip6(&self, addr: &crate::ipv6_addr::Addr, prefix_len: u8) {
-    // Bring interface up
+  pub fn bring_interface_up(&self) {
     let mut cmd = std::process::Command::new("ip");
     cmd.arg("link");
     cmd.arg("set");
@@ -53,7 +52,9 @@ impl TunInterface {
     cmd.arg("up");
 
     cmd.spawn().unwrap().wait().unwrap();
+  }
 
+  pub fn set_ip6(&self, addr: &crate::ipv6_addr::Addr, prefix_len: u8) {
     let formatted = addr.to_ipv6();
 
     let mut cmd = String::new();
