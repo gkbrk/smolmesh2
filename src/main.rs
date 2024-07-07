@@ -1,7 +1,10 @@
 #[macro_use]
 extern crate lazy_static;
 
-use std::{collections::VecDeque, io::Write};
+use std::{
+  collections::{HashSet, VecDeque},
+  io::Write,
+};
 
 mod admin_server;
 mod all_senders;
@@ -31,6 +34,8 @@ fn run_meshnode(args: &mut VecDeque<String>) {
   let config = json::parse(&config_file).unwrap();
   let all_senders = all_senders::get();
 
+  let mut our_ips = HashSet::new();
+
   // Admin server
 
   std::thread::spawn(|| loop {
@@ -42,6 +47,7 @@ fn run_meshnode(args: &mut VecDeque<String>) {
 
   let node_name = config["node_name"].as_str().unwrap().to_owned();
   let node_ip = crate::ip_addr::IpAddr::from_node_name(&node_name);
+  our_ips.insert(node_ip);
 
   admin_server::start_admin_server(node_name.clone(), 8765);
 
@@ -58,6 +64,25 @@ fn run_meshnode(args: &mut VecDeque<String>) {
       packet.write_all(&millis().to_le_bytes()).unwrap();
       packet.push(0);
       packet.write_all(node_name.as_bytes()).unwrap();
+
+      all_senders.send_all(packet);
+
+      let delay = 5.0 + rng::uniform() * 5.0;
+      std::thread::sleep(std::time::Duration::from_secs_f64(delay));
+    });
+  }
+
+  for addr in config["ipv4_addresses"].members() {
+    let addr = addr.as_str().unwrap();
+    let addr = addr.split(".").map(|x| x.parse::<u8>().unwrap()).collect::<Vec<u8>>();
+
+    our_ips.insert(crate::ip_addr::IpAddr::V4(addr[0], addr[1], addr[2], addr[3]));
+
+    std::thread::spawn(move || loop {
+      let mut packet = Vec::new();
+      packet.write_all(&millis().to_le_bytes()).unwrap();
+      packet.push(2);
+      packet.extend_from_slice(&addr);
 
       all_senders.send_all(packet);
 
@@ -96,15 +121,28 @@ fn run_meshnode(args: &mut VecDeque<String>) {
   }
 
   let mut tun_senders: Vec<crossbeam::channel::Sender<Vec<u8>>> = Vec::new();
+  let mut route_adders = Vec::new();
 
   #[cfg(unix)]
   if let Some(true) = config["linux_tuntap"].as_bool() {
     let interface_name = "smolmesh1";
     let tun = linux_tuntap::TunInterface::open(interface_name);
     tun.bring_interface_up();
-    tun.set_ip6(&node_ip, 8);
+    tun.set_ip6(&node_ip, 128);
+
+    // Handle IPv4 addresses
+    for addr in config["ipv4_addresses"].members() {
+      let addr = addr.as_str().unwrap();
+      let addr = addr.split(".").map(|x| x.parse::<u8>().unwrap()).collect::<Vec<u8>>();
+      let addr = crate::ip_addr::IpAddr::V4(addr[0], addr[1], addr[2], addr[3]);
+      tun.set_ipv4(&addr)
+    }
+
     let tun_sender = tun.run();
     tun_senders.push(tun_sender);
+
+    let route_adder = tun.route_creator();
+    route_adders.push(route_adder);
   }
 
   #[cfg(windows)]
@@ -147,6 +185,11 @@ fn run_meshnode(args: &mut VecDeque<String>) {
           let addr = crate::ip_addr::IpAddr::from_node_name(packet_node_name);
           all_senders.add_fastest_to(ms, addr, _sender);
           recent.set_alive(packet_node_name);
+
+          // Add route to the node
+          for route_adder in &route_adders {
+            route_adder.send(addr).unwrap();
+          }
         }
 
         all_senders.send_all(orig_data.clone());
@@ -160,6 +203,11 @@ fn run_meshnode(args: &mut VecDeque<String>) {
         let addr = crate::ip_addr::IpAddr::ipv6_from_buf(data);
         all_senders.add_fastest_to(ms, addr, _sender);
         all_senders.send_all(orig_data.clone());
+
+        // Add route to the node
+        for route_adder in &route_adders {
+          route_adder.send(addr).unwrap();
+        }
       }
       2 => {
         // Tracer packet that means "I handle this IPv4 address"
@@ -170,16 +218,29 @@ fn run_meshnode(args: &mut VecDeque<String>) {
         let addr = crate::ip_addr::IpAddr::ipv4_from_buf(data);
         all_senders.add_fastest_to(ms, addr, _sender);
         all_senders.send_all(orig_data.clone());
+
+        // Add route to the node
+        for route_adder in &route_adders {
+          route_adder.send(addr).unwrap();
+        }
       }
       3 => {
-        // IPv6 packet
-        let target_addr = crate::ip_addr::IpAddr::ipv6_from_buf(&data[24..40]);
+        let ip_version = (data[0] & 0b11110000) >> 4;
 
-        for tun_sender in &tun_senders {
-          tun_sender.send(data.to_vec()).unwrap();
-        }
+        let target_addr = match ip_version {
+          4 => crate::ip_addr::IpAddr::ipv4_from_buf(&data[16..20]),
+          6 => crate::ip_addr::IpAddr::ipv6_from_buf(&data[24..40]),
+          _ => {
+            println!("Invalid IP version: {}", ip_version);
+            continue;
+          }
+        };
 
-        if target_addr != node_ip {
+        if our_ips.contains(&target_addr) {
+          for tun_sender in &tun_senders {
+            tun_sender.send(data.to_vec()).unwrap();
+          }
+        } else {
           all_senders.send_to_fastest(target_addr, orig_data.to_vec());
         }
       }
@@ -283,7 +344,8 @@ fn main() {
     }
     "make-random-ipv6" => {
       let addr = crate::ip_addr::IpAddr::V6(
-        0xfd, 0x00,
+        0xfd,
+        0x00,
         (rng::u64() & 0xFF) as u8,
         (rng::u64() & 0xFF) as u8,
         (rng::u64() & 0xFF) as u8,

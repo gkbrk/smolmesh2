@@ -65,6 +65,15 @@ impl TunInterface {
     proc.spawn().unwrap().wait().unwrap();
   }
 
+  pub(crate) fn set_ipv4(&self, addr: &crate::ip_addr::IpAddr) {
+    let cmd = format!("ip -4 addr add {}/32 dev smolmesh1", addr);
+    let mut proc = std::process::Command::new("sh");
+    proc.arg("-c");
+    proc.arg(cmd);
+
+    proc.spawn().unwrap().wait().unwrap();
+  }
+
   pub(crate) fn run(&self) -> crossbeam::channel::Sender<Vec<u8>> {
     let fd = self.fd;
 
@@ -99,6 +108,39 @@ impl TunInterface {
           libc::write(fd, packet.as_ptr() as *const libc::c_void, packet.len());
         }
       }
+    });
+
+    sender
+  }
+
+  pub(crate) fn route_creator(&self) -> crossbeam::channel::Sender<crate::ip_addr::IpAddr> {
+    let (sender, receiver) = crossbeam::channel::unbounded::<crate::ip_addr::IpAddr>();
+
+    let mut already_added = std::collections::HashSet::new();
+
+    std::thread::spawn(move || for addr in receiver {
+      if already_added.contains(&addr) {
+        continue;
+      }
+      already_added.insert(addr);
+
+      let version = match addr {
+        crate::ip_addr::IpAddr::V4(..) => 4,
+        crate::ip_addr::IpAddr::V6(..) => 6,
+      };
+
+      let prefix_len = match addr {
+        crate::ip_addr::IpAddr::V4(..) => 32,
+        crate::ip_addr::IpAddr::V6(..) => 128,
+      };
+
+      let cmd = format!("ip -{} route add {}/{} dev smolmesh1", version, addr, prefix_len);
+      let mut proc = std::process::Command::new("sh");
+      proc.arg("-c");
+      proc.arg(cmd);
+      proc.stdout(std::process::Stdio::null());
+      proc.stderr(std::process::Stdio::null());
+      proc.spawn().unwrap().wait().unwrap();
     });
 
     sender
