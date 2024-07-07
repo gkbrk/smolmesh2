@@ -10,15 +10,15 @@ codegen-units = 1
 
 [dependencies]
 json = "0.12.4"
-lazy_static = "1.4.0"
+lazy_static = "1.5.0"
 crossbeam = "0.8.4"
-chrono = "0.4.31"
-socket2 = { version = "0.5.5", features = ["all"] }
-libc = "0.2.152"
-libloading = "0.8.1"
+chrono = "0.4.38"
+socket2 = { version = "0.5.7", features = ["all"] }
+libc = "0.2.155"
+libloading = "0.8.4"
 
 [dependencies.nix]
-version = "0.27.1"
+version = "0.29.0"
 features = ["net", "poll"]
 
 [dependencies.windows-sys]

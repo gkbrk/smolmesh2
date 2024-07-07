@@ -90,8 +90,8 @@ fn poll_readable(sock: &socket2::Socket, timeout_ms: usize) -> DSSResult<()> {
 
   let fd = sock.as_raw_fd();
   let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
-  let pollfd = nix::poll::PollFd::new(&fd, read_or_error);
-  let res = nix::poll::poll(&mut [pollfd], timeout_ms as i32)?;
+  let pollfd = nix::poll::PollFd::new(fd, read_or_error);
+  let res = nix::poll::poll(&mut [pollfd], timeout_ms as u16)?;
 
   if res <= 0 {
     return Err("poll failed".into());
