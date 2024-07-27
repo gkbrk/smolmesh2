@@ -1,7 +1,32 @@
+use std::sync::Arc;
+
 use crate::leo_async;
 
-pub(crate) struct TunInterface {
+struct OwnedFd {
   fd: i32,
+}
+
+impl OwnedFd {
+  fn new(fd: i32) -> Self {
+    Self { fd }
+  }
+
+  fn fd(&self) -> i32 {
+    self.fd
+  }
+}
+
+impl Drop for OwnedFd {
+  fn drop(&mut self) {
+    crate::log!("Closing file descriptor {}", self.fd);
+    unsafe {
+      libc::close(self.fd);
+    }
+  }
+}
+
+pub(crate) struct TunInterface {
+  fd: Arc<OwnedFd>,
 }
 
 unsafe fn nix_libc_open(path: &str) -> i32 {
@@ -42,7 +67,9 @@ impl TunInterface {
       libc::ioctl(fd, tunsetiff, ifr.as_mut_ptr());
     }
 
-    Self { fd }
+    Self {
+      fd: Arc::new(OwnedFd::new(fd)),
+    }
   }
 
   pub(crate) async fn bring_interface_up(&self) {
@@ -83,60 +110,65 @@ impl TunInterface {
   }
 
   pub(crate) fn run(&self) -> leo_async::mpsc::Sender<Vec<u8>> {
-    let fd = self.fd;
-
     // tun -> network
-    std::thread::spawn(move || {
-      let all_senders = crate::all_senders::get();
-      loop {
-        let mut packet = Vec::<u8>::with_capacity(2048);
+    {
+      let fd = self.fd.clone();
+      std::thread::spawn(move || {
+        let all_senders = crate::all_senders::get();
+        let fd = fd.clone();
+        loop {
+          let mut packet = Vec::<u8>::with_capacity(2048);
 
-        let amount = unsafe {
-          match libc::read(fd, packet.as_mut_ptr().cast(), packet.capacity() as usize) {
-            -1 => {
-              println!("Error reading from tun: {}", std::io::Error::last_os_error());
+          let amount = unsafe {
+            match libc::read(fd.fd(), packet.as_mut_ptr().cast(), packet.capacity() as usize) {
+              -1 => {
+                println!("Error reading from tun: {}", std::io::Error::last_os_error());
+                continue;
+              }
+              0 => break,
+              x => x,
+            }
+          };
+
+          unsafe {
+            packet.set_len(amount as usize);
+          }
+
+          let ip_version = (packet[0] & 0b11110000) >> 4;
+
+          let target_addr = match (ip_version, packet.len()) {
+            (4, 20..) => crate::ip_addr::IpAddr::ipv4_from_buf(&packet[16..20]),
+            (6, 40..) => crate::ip_addr::IpAddr::ipv6_from_buf(&packet[24..40]),
+            _ => {
+              println!("Invalid IP version and packet length: {} {}", ip_version, packet.len());
               continue;
             }
-            0 => break,
-            x => x,
-          }
-        };
+          };
 
-        unsafe {
-          packet.set_len(amount as usize);
+          let mut netpacket = Vec::new();
+          netpacket.extend_from_slice(&crate::millis().to_le_bytes());
+          netpacket.push(3);
+          netpacket.extend_from_slice(&packet);
+          all_senders.send_to_fastest(target_addr, netpacket);
         }
-
-        let ip_version = (packet[0] & 0b11110000) >> 4;
-
-        let target_addr = match (ip_version, packet.len()) {
-          (4, 20..) => crate::ip_addr::IpAddr::ipv4_from_buf(&packet[16..20]),
-          (6, 40..) => crate::ip_addr::IpAddr::ipv6_from_buf(&packet[24..40]),
-          _ => {
-            println!("Invalid IP version and packet length: {} {}", ip_version, packet.len());
-            continue;
-          }
-        };
-
-        let mut netpacket = Vec::new();
-        netpacket.extend_from_slice(&crate::millis().to_le_bytes());
-        netpacket.push(3);
-        netpacket.extend_from_slice(&packet);
-        all_senders.send_to_fastest(target_addr, netpacket);
-      }
-    });
+      });
+    }
 
     // network -> tun
     let (sender, receiver) = leo_async::mpsc::channel::<Vec<u8>>();
 
-    leo_async::spawn(async move {
-      loop {
-        if let Some(packet) = receiver.recv().await {
-          unsafe {
-            libc::write(fd, packet.as_ptr() as *const libc::c_void, packet.len());
+    {
+      let fd = self.fd.clone();
+      leo_async::spawn(async move {
+        loop {
+          if let Some(packet) = receiver.recv().await {
+            unsafe {
+              libc::write(fd.fd(), packet.as_ptr() as *const libc::c_void, packet.len());
+            }
           }
         }
-      }
-    });
+      });
+    }
 
     sender
   }
@@ -164,12 +196,15 @@ impl TunInterface {
         };
 
         let cmd = format!("ip -{} route add {}/{} dev smolmesh1", version, addr, prefix_len);
-        let mut proc = std::process::Command::new("sh");
-        proc.arg("-c");
-        proc.arg(cmd);
-        proc.stdout(std::process::Stdio::null());
-        proc.stderr(std::process::Stdio::null());
-        proc.spawn().unwrap().wait().unwrap();
+        leo_async::fn_thread_future(move || {
+          let mut proc = std::process::Command::new("sh");
+          proc.arg("-c");
+          proc.arg(cmd);
+          proc.stdout(std::process::Stdio::null());
+          proc.stderr(std::process::Stdio::null());
+          proc.spawn().unwrap().wait().unwrap();
+        })
+        .await;
       }
     });
 

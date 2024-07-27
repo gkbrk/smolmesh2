@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 
-use crate::all_senders;
+use crate::{all_senders, log};
 
 type DResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 type DSSResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -247,7 +247,7 @@ fn connect_impl(
 
       assert_eq!(expected_keyfinder, Vec::from(recv_keyfinder));
 
-      println!("Got correct keyfinder");
+      log!("Got correct keyfinder");
 
       let recv_enc_key = crate::speck::multispeck3(key, &recv_iv, b"enc_key");
       let recv_mac_key = crate::speck::multispeck3(key, &recv_iv, b"mac_key");
@@ -289,7 +289,10 @@ fn connect_impl(
         let expected_mac = crate::speck::multispeck2(&recv_mac_key, &data);
         assert_eq!(expected_mac, Vec::from(mac));
 
-        incoming.send((data, sender_tx.clone())).unwrap();
+        if let Err(err) = incoming.send((data, sender_tx.clone())) {
+          log!("Error sending data: {}", err);
+          break Ok(());
+        }
       }
     });
   })

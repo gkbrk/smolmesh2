@@ -3,7 +3,7 @@ use std::{
   num::NonZeroUsize,
   pin::Pin,
   sync::{Arc, LazyLock, Mutex, RwLock},
-  task::Poll,
+  task::{Poll, Waker},
 };
 
 use crossbeam::atomic::AtomicCell;
@@ -270,5 +270,87 @@ pub(super) mod mpsc {
     };
 
     (sender, receiver)
+  }
+}
+
+pub(super) struct TimeoutFuture<F, T>
+where
+  F: Future<Output = T>,
+{
+  future: F,
+  timeout_at: std::time::Instant,
+}
+
+pub(super) fn timeout_future<F, T>(future: F, timeout: std::time::Duration) -> TimeoutFuture<F, T>
+where
+  F: Future<Output = T> + Unpin,
+{
+  TimeoutFuture {
+    future,
+    timeout_at: std::time::Instant::now() + timeout,
+  }
+}
+
+fn wake_up_at(waker: Waker, instant: std::time::Instant) {
+  std::thread::spawn(move || {
+    let now = std::time::Instant::now();
+
+    if instant > now {
+      std::thread::sleep(instant - now);
+    }
+
+    waker.wake();
+  });
+}
+
+struct YieldFuture(bool);
+
+impl Future for YieldFuture {
+  type Output = ();
+
+  fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context) -> Poll<Self::Output> {
+    if self.0 {
+      Poll::Ready(())
+    } else {
+      self.0 = true;
+      cx.waker().wake_by_ref();
+      Poll::Pending
+    }
+  }
+}
+
+pub(super) fn yield_now() -> impl Future<Output = ()> {
+  YieldFuture(false)
+}
+
+impl<F, T> Future for TimeoutFuture<F, T>
+where
+  F: Future<Output = T> + Unpin,
+{
+  type Output = std::result::Result<T, ()>;
+
+  fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context) -> std::task::Poll<Self::Output> {
+    let now = std::time::Instant::now();
+
+    crate::log!("{:?} {:?}", now, self.timeout_at);
+
+    if now >= self.timeout_at {
+      return std::task::Poll::Ready(Err(()));
+    }
+
+    let timeout_at = self.timeout_at;
+
+    let this = self.get_mut();
+    let future = Pin::new(&mut this.future);
+    let poll_res = future.poll(cx);
+
+    match poll_res {
+      Poll::Ready(output) => Poll::Ready(Ok(output)),
+      Poll::Pending => {
+        let waker = cx.waker().clone();
+        wake_up_at(waker, timeout_at);
+        Poll::Pending
+      }
+    }
   }
 }

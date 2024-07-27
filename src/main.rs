@@ -14,6 +14,7 @@ mod legacy_tcp;
 mod leo_async;
 #[cfg(unix)]
 mod linux_tuntap;
+mod log;
 mod raw_speck;
 mod rng;
 mod seen_packets;
@@ -158,6 +159,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
   }
 
   loop {
+    leo_async::yield_now().await;
     let (data, _sender) = receiver.recv().unwrap();
 
     // First 8 bytes are the milliseconds since epoch
@@ -264,6 +266,7 @@ fn run_name_to_ipv6(args: &mut VecDeque<String>) {
 }
 
 async fn async_main() -> DSSResult<()> {
+  crate::log!("Entered async_main");
   leo_async::fn_thread_future(rng::init_rng).await;
 
   let mut args: VecDeque<String> = std::env::args().collect();
@@ -323,5 +326,9 @@ async fn async_main() -> DSSResult<()> {
 }
 
 fn main() {
-  leo_async::run_main(async_main()).expect("async_main returned an error");
+  crate::log!("Entered main");
+  let async_main = async_main();
+  // let async_main = leo_async::timeout_future(Box::pin(async_main), std::time::Duration::from_secs(15));
+
+  leo_async::run_main(async_main).expect("async_main returned an error");
 }
