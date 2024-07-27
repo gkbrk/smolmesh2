@@ -147,6 +147,15 @@ fn run_forever() {
   }
 }
 
+pub(super) fn sleep_seconds(seconds: impl Into<f64>) -> impl Future<Output = ()> {
+  let seconds = seconds.into();
+
+  // TODO: Don't spawn 1 thread for each sleep
+  fn_thread_future(move || {
+    std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
+  })
+}
+
 pub(super) mod mpsc {
   use std::{
     collections::VecDeque,

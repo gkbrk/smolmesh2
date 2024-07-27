@@ -43,7 +43,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
 
       let delay = 5.0 + rng::uniform() * 5.0;
 
-      leo_async::fn_thread_future(move || std::thread::sleep(std::time::Duration::from_secs_f64(delay))).await;
+      leo_async::sleep_seconds(delay).await;
     }
   });
 
@@ -69,7 +69,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
         all_senders.send_all(packet);
 
         let delay = 5.0 + rng::uniform() * 5.0;
-        leo_async::fn_thread_future(move || std::thread::sleep(std::time::Duration::from_secs_f64(delay))).await;
+        leo_async::sleep_seconds(delay).await;
       }
     });
   }
@@ -80,16 +80,18 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
 
     our_ips.insert(crate::ip_addr::IpAddr::V4(addr[0], addr[1], addr[2], addr[3]));
 
-    std::thread::spawn(move || loop {
-      let mut packet = Vec::new();
-      packet.write_all(&millis().to_le_bytes()).unwrap();
-      packet.push(2);
-      packet.extend_from_slice(&addr);
+    leo_async::spawn(async move {
+      loop {
+        let mut packet = Vec::new();
+        packet.write_all(&millis().to_le_bytes()).unwrap();
+        packet.push(2);
+        packet.extend_from_slice(&addr);
 
-      all_senders.send_all(packet);
+        all_senders.send_all(packet);
 
-      let delay = 5.0 + rng::uniform() * 5.0;
-      std::thread::sleep(std::time::Duration::from_secs_f64(delay));
+        let delay = 5.0 + rng::uniform() * 5.0;
+        leo_async::sleep_seconds(delay).await;
+      }
     });
   }
 
