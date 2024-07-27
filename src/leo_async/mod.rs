@@ -3,7 +3,7 @@ use std::{
   num::NonZeroUsize,
   pin::Pin,
   sync::{Arc, LazyLock, Mutex, OnceLock, RwLock},
-  task::Poll,
+  task::{Poll, Waker},
 };
 
 use crossbeam::atomic::AtomicCell;
@@ -144,5 +144,122 @@ fn run_forever() {
         *future_slot = Some(future);
       }
     }
+  }
+}
+
+pub(super) mod mpsc {
+  use std::{
+    collections::VecDeque,
+    future::Future,
+    sync::{
+      atomic::{AtomicBool, AtomicUsize, Ordering},
+      Arc, Mutex,
+    },
+    task::{Poll, Waker},
+  };
+
+  pub struct Receiver<T> {
+    q: Arc<Mutex<VecDeque<T>>>,
+    waker: Arc<Mutex<Option<Waker>>>,
+    sender_count: Arc<AtomicUsize>,
+    receiver_there: Arc<AtomicBool>,
+  }
+
+  pub struct Sender<T> {
+    q: Arc<Mutex<VecDeque<T>>>,
+    waker: Arc<Mutex<Option<Waker>>>,
+    sender_count: Arc<AtomicUsize>,
+    receiver_there: Arc<AtomicBool>,
+  }
+
+  impl<T> Sender<T> {
+    pub fn send(&self, value: T) -> Result<(), ()> {
+      if self.receiver_there.load(Ordering::SeqCst) {
+        let mut q = self.q.lock().unwrap();
+        q.push_back(value);
+
+        if let Some(waker) = self.waker.lock().unwrap().take() {
+          waker.wake();
+        }
+
+        Ok(())
+      } else {
+        Err(())
+      }
+    }
+  }
+
+  impl<T> Drop for Sender<T> {
+    fn drop(&mut self) {
+      let count = self.sender_count.fetch_sub(1, Ordering::SeqCst);
+      match count {
+        0 => panic!("Dropped below zero"),
+        1 => {
+          if let Some(waker) = self.waker.lock().unwrap().take() {
+            waker.wake();
+          }
+        }
+        _ => {}
+      }
+    }
+  }
+
+  impl<T> Clone for Sender<T> {
+    fn clone(&self) -> Self {
+      self.sender_count.fetch_add(1, Ordering::SeqCst);
+
+      Sender {
+        q: self.q.clone(),
+        waker: self.waker.clone(),
+        sender_count: self.sender_count.clone(),
+        receiver_there: self.receiver_there.clone(),
+      }
+    }
+  }
+
+  impl<T> Receiver<T> {
+    pub fn recv(&self) -> impl Future<Output = Option<T>> + '_ {
+      std::future::poll_fn(|ctx| {
+        let mut q = self.q.lock().unwrap();
+        if let Some(value) = q.pop_front() {
+          Poll::Ready(Some(value))
+        } else if self.sender_count.load(Ordering::SeqCst) > 0 {
+          let waker = ctx.waker().clone();
+          *self.waker.lock().unwrap() = Some(waker);
+          Poll::Pending
+        } else {
+          Poll::Ready(None)
+        }
+      })
+    }
+  }
+
+  impl<T> Drop for Receiver<T> {
+    fn drop(&mut self) {
+      self.receiver_there.store(false, Ordering::SeqCst);
+    }
+  }
+
+  pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
+    let q = Arc::new(Mutex::new(VecDeque::new()));
+    let waker = Arc::new(Mutex::new(None));
+    let sender_count = Arc::new(AtomicUsize::new(1));
+    let receiver_there = Arc::new(AtomicBool::new(true));
+
+    let sender = Sender {
+      q: q.clone(),
+      waker: waker.clone(),
+      sender_count: sender_count.clone(),
+      receiver_there: receiver_there.clone(),
+    };
+
+    let receiver = Receiver {
+      q,
+      waker,
+      sender_count,
+      receiver_there,
+    };
+
+    (sender, receiver)
   }
 }
