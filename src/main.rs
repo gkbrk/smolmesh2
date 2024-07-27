@@ -6,9 +6,12 @@ use std::{
   io::Write,
 };
 
+use leo_async::DSSResult;
+
 mod all_senders;
 mod ip_addr;
 mod legacy_tcp;
+mod leo_async;
 #[cfg(unix)]
 mod linux_tuntap;
 mod raw_speck;
@@ -251,8 +254,8 @@ fn run_name_to_ipv6(args: &mut VecDeque<String>) {
   println!("{}", ipv6);
 }
 
-fn main() {
-  rng::init_rng();
+async fn async_main() -> DSSResult<()> {
+  leo_async::fn_thread_future(rng::init_rng).await;
 
   let mut args: VecDeque<String> = std::env::args().collect();
 
@@ -306,4 +309,10 @@ fn main() {
       println!("Unknown command '{}'", x);
     }
   }
+
+  Ok(())
+}
+
+fn main() {
+  leo_async::run_main(async_main()).expect("async_main returned an error");
 }
