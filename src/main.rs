@@ -29,7 +29,7 @@ fn millis() -> u64 {
   since_epoch.as_millis() as u64
 }
 
-fn run_meshnode(args: &mut VecDeque<String>) {
+async fn run_meshnode(args: &mut VecDeque<String>) {
   let config_path = args.pop_front().unwrap();
   let config_file = std::fs::read_to_string(config_path).unwrap();
   let config = json::parse(&config_file).unwrap();
@@ -119,15 +119,15 @@ fn run_meshnode(args: &mut VecDeque<String>) {
     legacy_tcp::listener(port, keys, sender.clone());
   }
 
-  let mut tun_senders: Vec<crossbeam::channel::Sender<Vec<u8>>> = Vec::new();
+  let mut tun_sender: Option<leo_async::mpsc::Sender<Vec<u8>>> = None;
   let mut route_adders = Vec::new();
 
   #[cfg(unix)]
   if let Some(true) = config["linux_tuntap"].as_bool() {
     let interface_name = "smolmesh1";
     let tun = linux_tuntap::TunInterface::open(interface_name);
-    tun.bring_interface_up();
-    tun.set_ip6(&node_ip, 128);
+    tun.bring_interface_up().await;
+    tun.set_ip6(&node_ip, 128).await;
 
     // Handle IPv4 addresses
     for addr in config["ipv4_addresses"].members() {
@@ -137,8 +137,8 @@ fn run_meshnode(args: &mut VecDeque<String>) {
       tun.set_ipv4(&addr)
     }
 
-    let tun_sender = tun.run();
-    tun_senders.push(tun_sender);
+    let _tun_sender = tun.run();
+    tun_sender.replace(_tun_sender);
 
     let route_adder = tun.route_creator();
     route_adders.push(route_adder);
@@ -233,8 +233,9 @@ fn run_meshnode(args: &mut VecDeque<String>) {
         };
 
         if our_ips.contains(&target_addr) {
-          for tun_sender in &tun_senders {
-            tun_sender.send(data.to_vec()).unwrap();
+          match &tun_sender {
+            Some(sender) => sender.send(data.to_vec()).unwrap(),
+            None => {}
           }
         } else {
           all_senders.send_to_fastest(target_addr, orig_data.to_vec());
@@ -269,7 +270,7 @@ async fn async_main() -> DSSResult<()> {
 
   match args.pop_front().unwrap().as_str() {
     "meshnode" => {
-      run_meshnode(&mut args);
+      run_meshnode(&mut args).await;
     }
     "name-to-ipv6" => {
       run_name_to_ipv6(&mut args);

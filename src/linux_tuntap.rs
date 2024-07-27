@@ -1,3 +1,5 @@
+use crate::leo_async;
+
 pub(crate) struct TunInterface {
   fd: i32,
 }
@@ -43,26 +45,32 @@ impl TunInterface {
     Self { fd }
   }
 
-  pub(crate) fn bring_interface_up(&self) {
-    let mut cmd = std::process::Command::new("ip");
-    cmd.arg("link");
-    cmd.arg("set");
-    cmd.arg("dev");
-    cmd.arg("smolmesh1");
-    cmd.arg("up");
+  pub(crate) async fn bring_interface_up(&self) {
+    leo_async::fn_thread_future(|| {
+      let mut cmd = std::process::Command::new("ip");
+      cmd.arg("link");
+      cmd.arg("set");
+      cmd.arg("dev");
+      cmd.arg("smolmesh1");
+      cmd.arg("up");
 
-    cmd.spawn().unwrap().wait().unwrap();
+      cmd.spawn().unwrap().wait().unwrap();
+    })
+    .await;
   }
 
-  pub(crate) fn set_ip6(&self, addr: &crate::ip_addr::IpAddr, prefix_len: u8) {
+  pub(crate) async fn set_ip6(&self, addr: &crate::ip_addr::IpAddr, prefix_len: u8) {
     // TODO: Get the name smolmesh1 from somewhere
     let cmd = format!("ip -6 addr add {}/{} dev smolmesh1", addr, prefix_len);
 
-    let mut proc = std::process::Command::new("sh");
-    proc.arg("-c");
-    proc.arg(cmd);
+    leo_async::fn_thread_future(|| {
+      let mut proc = std::process::Command::new("sh");
+      proc.arg("-c");
+      proc.arg(cmd);
 
-    proc.spawn().unwrap().wait().unwrap();
+      proc.spawn().unwrap().wait().unwrap();
+    })
+    .await;
   }
 
   pub(crate) fn set_ipv4(&self, addr: &crate::ip_addr::IpAddr) {
@@ -74,7 +82,7 @@ impl TunInterface {
     proc.spawn().unwrap().wait().unwrap();
   }
 
-  pub(crate) fn run(&self) -> crossbeam::channel::Sender<Vec<u8>> {
+  pub(crate) fn run(&self) -> leo_async::mpsc::Sender<Vec<u8>> {
     let fd = self.fd;
 
     // tun -> network
@@ -118,12 +126,14 @@ impl TunInterface {
     });
 
     // network -> tun
-    let (sender, receiver) = crossbeam::channel::unbounded::<Vec<u8>>();
+    let (sender, receiver) = leo_async::mpsc::channel::<Vec<u8>>();
 
-    std::thread::spawn(move || {
-      for packet in receiver {
-        unsafe {
-          libc::write(fd, packet.as_ptr() as *const libc::c_void, packet.len());
+    leo_async::spawn(async move {
+      loop {
+        if let Some(packet) = receiver.recv().await {
+          unsafe {
+            libc::write(fd, packet.as_ptr() as *const libc::c_void, packet.len());
+          }
         }
       }
     });
@@ -136,29 +146,31 @@ impl TunInterface {
 
     let mut already_added = std::collections::HashSet::new();
 
-    std::thread::spawn(move || for addr in receiver {
-      if already_added.contains(&addr) {
-        continue;
+    std::thread::spawn(move || {
+      for addr in receiver {
+        if already_added.contains(&addr) {
+          continue;
+        }
+        already_added.insert(addr);
+
+        let version = match addr {
+          crate::ip_addr::IpAddr::V4(..) => 4,
+          crate::ip_addr::IpAddr::V6(..) => 6,
+        };
+
+        let prefix_len = match addr {
+          crate::ip_addr::IpAddr::V4(..) => 32,
+          crate::ip_addr::IpAddr::V6(..) => 128,
+        };
+
+        let cmd = format!("ip -{} route add {}/{} dev smolmesh1", version, addr, prefix_len);
+        let mut proc = std::process::Command::new("sh");
+        proc.arg("-c");
+        proc.arg(cmd);
+        proc.stdout(std::process::Stdio::null());
+        proc.stderr(std::process::Stdio::null());
+        proc.spawn().unwrap().wait().unwrap();
       }
-      already_added.insert(addr);
-
-      let version = match addr {
-        crate::ip_addr::IpAddr::V4(..) => 4,
-        crate::ip_addr::IpAddr::V6(..) => 6,
-      };
-
-      let prefix_len = match addr {
-        crate::ip_addr::IpAddr::V4(..) => 32,
-        crate::ip_addr::IpAddr::V6(..) => 128,
-      };
-
-      let cmd = format!("ip -{} route add {}/{} dev smolmesh1", version, addr, prefix_len);
-      let mut proc = std::process::Command::new("sh");
-      proc.arg("-c");
-      proc.arg(cmd);
-      proc.stdout(std::process::Stdio::null());
-      proc.stderr(std::process::Stdio::null());
-      proc.spawn().unwrap().wait().unwrap();
     });
 
     sender
