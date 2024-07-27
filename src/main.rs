@@ -120,7 +120,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
   }
 
   let mut tun_sender: Option<leo_async::mpsc::Sender<Vec<u8>>> = None;
-  let mut route_adders = Vec::new();
+  let mut route_adder: Option<leo_async::mpsc::Sender<ip_addr::IpAddr>> = None;
 
   #[cfg(unix)]
   if let Some(true) = config["linux_tuntap"].as_bool() {
@@ -140,8 +140,8 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
     let _tun_sender = tun.run();
     tun_sender.replace(_tun_sender);
 
-    let route_adder = tun.route_creator();
-    route_adders.push(route_adder);
+    let _route_adder = tun.route_creator();
+    route_adder.replace(_route_adder);
   }
 
   #[cfg(windows)]
@@ -183,8 +183,9 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
           all_senders.add_fastest_to(ms, addr, _sender);
 
           // Add route to the node
-          for route_adder in &route_adders {
-            route_adder.send(addr).unwrap();
+          match &route_adder {
+            Some(route_adder) => route_adder.send(addr).unwrap(),
+            None => {}
           }
         }
 
@@ -201,8 +202,9 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
         all_senders.send_all(orig_data.clone());
 
         // Add route to the node
-        for route_adder in &route_adders {
-          route_adder.send(addr).unwrap();
+        match &route_adder {
+          Some(route_adder) => route_adder.send(addr).unwrap(),
+          None => {}
         }
       }
       2 => {
@@ -216,8 +218,9 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
         all_senders.send_all(orig_data.clone());
 
         // Add route to the node
-        for route_adder in &route_adders {
-          route_adder.send(addr).unwrap();
+        match &route_adder {
+          Some(route_adder) => route_adder.send(addr).unwrap(),
+          None => {}
         }
       }
       3 => {

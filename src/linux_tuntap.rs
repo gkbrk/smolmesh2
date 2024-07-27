@@ -141,13 +141,13 @@ impl TunInterface {
     sender
   }
 
-  pub(crate) fn route_creator(&self) -> crossbeam::channel::Sender<crate::ip_addr::IpAddr> {
-    let (sender, receiver) = crossbeam::channel::unbounded::<crate::ip_addr::IpAddr>();
+  pub(crate) fn route_creator(&self) -> leo_async::mpsc::Sender<crate::ip_addr::IpAddr> {
+    let (sender, receiver) = leo_async::mpsc::channel::<crate::ip_addr::IpAddr>();
 
     let mut already_added = std::collections::HashSet::new();
 
-    std::thread::spawn(move || {
-      for addr in receiver {
+    leo_async::spawn(async move {
+      while let Some(addr) = receiver.recv().await {
         if already_added.contains(&addr) {
           continue;
         }
