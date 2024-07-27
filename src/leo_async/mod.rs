@@ -2,8 +2,8 @@ use std::{
   future::Future,
   num::NonZeroUsize,
   pin::Pin,
-  sync::{Arc, LazyLock, Mutex, OnceLock, RwLock},
-  task::{Poll, Waker},
+  sync::{Arc, LazyLock, Mutex, RwLock},
+  task::Poll,
 };
 
 use crossbeam::atomic::AtomicCell;
