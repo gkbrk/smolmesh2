@@ -37,13 +37,14 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
 
   let mut our_ips = HashSet::new();
 
-  // Admin server
+  leo_async::spawn(async {
+    loop {
+      all_senders.clean_broken_senders();
 
-  std::thread::spawn(|| loop {
-    all_senders.clean_broken_senders();
+      let delay = 5.0 + rng::uniform() * 5.0;
 
-    let delay = 5.0 + rng::uniform() * 5.0;
-    std::thread::sleep(std::time::Duration::from_secs_f64(delay));
+      leo_async::fn_thread_future(move || std::thread::sleep(std::time::Duration::from_secs_f64(delay))).await;
+    }
   });
 
   let node_name = config["node_name"].as_str().unwrap().to_owned();
@@ -58,16 +59,18 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
   // learn the path to us.
   {
     let node_name = node_name.clone();
-    std::thread::spawn(move || loop {
-      let mut packet = Vec::new();
-      packet.write_all(&millis().to_le_bytes()).unwrap();
-      packet.push(0);
-      packet.write_all(node_name.as_bytes()).unwrap();
+    leo_async::spawn(async move {
+      loop {
+        let mut packet = Vec::new();
+        packet.write_all(&millis().to_le_bytes()).unwrap();
+        packet.push(0);
+        packet.write_all(node_name.as_bytes()).unwrap();
 
-      all_senders.send_all(packet);
+        all_senders.send_all(packet);
 
-      let delay = 5.0 + rng::uniform() * 5.0;
-      std::thread::sleep(std::time::Duration::from_secs_f64(delay));
+        let delay = 5.0 + rng::uniform() * 5.0;
+        leo_async::fn_thread_future(move || std::thread::sleep(std::time::Duration::from_secs_f64(delay))).await;
+      }
     });
   }
 
