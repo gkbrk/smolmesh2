@@ -6,14 +6,12 @@ use std::{
   io::Write,
 };
 
-mod admin_server;
 mod all_senders;
 mod ip_addr;
 mod legacy_tcp;
 #[cfg(unix)]
 mod linux_tuntap;
 mod raw_speck;
-mod recently_seen_nodes;
 mod rng;
 mod seen_packets;
 mod speck;
@@ -48,8 +46,6 @@ fn run_meshnode(args: &mut VecDeque<String>) {
   let node_name = config["node_name"].as_str().unwrap().to_owned();
   let node_ip = crate::ip_addr::IpAddr::from_node_name(&node_name);
   our_ips.insert(node_ip);
-
-  admin_server::start_admin_server(node_name.clone(), 8765);
 
   let mut seen_packets = seen_packets::SeenPackets::new(8128);
 
@@ -177,14 +173,11 @@ fn run_meshnode(args: &mut VecDeque<String>) {
     let cmd = &data[8];
     let data = &data[9..];
 
-    let recent = recently_seen_nodes::get();
-
     match cmd {
       0 => {
         if let Ok(packet_node_name) = std::str::from_utf8(data) {
           let addr = crate::ip_addr::IpAddr::from_node_name(packet_node_name);
           all_senders.add_fastest_to(ms, addr, _sender);
-          recent.set_alive(packet_node_name);
 
           // Add route to the node
           for route_adder in &route_adders {
@@ -242,61 +235,6 @@ fn run_meshnode(args: &mut VecDeque<String>) {
           }
         } else {
           all_senders.send_to_fastest(target_addr, orig_data.to_vec());
-        }
-      }
-      5 => {
-        // Traceroute packet
-        let target_len = data[0] as usize;
-        let target = &data[1..1 + target_len];
-        let target = std::str::from_utf8(target).unwrap_or("tgt");
-        let target_addr = crate::ip_addr::IpAddr::from_node_name(target);
-
-        let src_len = data[1 + target_len] as usize;
-        let src = &data[1 + target_len + 1..1 + target_len + 1 + src_len];
-        let src = std::str::from_utf8(src).unwrap_or("src");
-        let src_addr = crate::ip_addr::IpAddr::from_node_name(src);
-
-        let mut path = Vec::new();
-        path.extend_from_slice(&data[1 + target_len + 1 + src_len..]);
-        path.extend_from_slice(format!("{} ", node_name).as_bytes());
-
-        if target_addr == node_ip {
-          // Send back traceroute response
-          let mut resp = Vec::new();
-          resp.write_all(&millis().to_le_bytes()).unwrap();
-          resp.push(6);
-          resp.push(src_len as u8);
-          resp.write_all(src.as_bytes()).unwrap();
-          resp.push(target_len as u8);
-          resp.write_all(target.as_bytes()).unwrap();
-          resp.extend_from_slice(&path);
-
-          all_senders.send_to_fastest(src_addr, resp);
-        } else {
-          let mut resp = Vec::new();
-          resp.extend_from_slice(&orig_data);
-          resp.extend_from_slice(format!("{} ", node_name).as_bytes());
-
-          all_senders.send_to_fastest(target_addr, resp);
-        }
-      }
-      6 => {
-        // Traceroute response
-        let src_len = data[0] as usize;
-        let src = &data[1..1 + src_len];
-        let src = std::str::from_utf8(src).unwrap_or("src");
-        let src_addr = crate::ip_addr::IpAddr::from_node_name(src);
-
-        let target_len = data[1 + src_len] as usize;
-        let target = &data[1 + src_len + 1..1 + src_len + 1 + target_len];
-        let target = std::str::from_utf8(target).unwrap_or("tgt");
-
-        let path = &data[1 + src_len + 1 + target_len..];
-
-        if src_addr == node_ip {
-          recently_seen_nodes::get().set_traceroute(target, std::str::from_utf8(path).unwrap_or(""));
-        } else {
-          all_senders.send_to_fastest(src_addr, orig_data.to_vec());
         }
       }
       _ => {
