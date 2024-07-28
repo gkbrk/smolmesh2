@@ -25,12 +25,6 @@ mod windows_tuntap;
 #[cfg(windows)]
 mod wintun;
 
-static DBGIDGEN: LazyLock<AtomicUsize> = LazyLock::new(|| AtomicUsize::new(0));
-
-fn gen_id() -> usize {
-  DBGIDGEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-}
-
 fn millis() -> u64 {
   let now = std::time::SystemTime::now();
   let since_epoch = now.duration_since(std::time::UNIX_EPOCH).unwrap();
