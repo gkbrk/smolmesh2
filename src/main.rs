@@ -4,7 +4,6 @@ extern crate lazy_static;
 use std::{
   collections::{HashSet, VecDeque},
   io::Write,
-  sync::{atomic::AtomicUsize, LazyLock},
 };
 
 use leo_async::DSSResult;
@@ -274,7 +273,7 @@ async fn async_main() -> DSSResult<()> {
   let mut args: VecDeque<String> = std::env::args().collect();
 
   // Ignore executable
-  let _ = args.pop_front();
+  let executable = args.pop_front().expect("Executable name should always be there");
 
   if args.is_empty() {
     args.push_back("meshnode".to_owned());
@@ -282,6 +281,25 @@ async fn async_main() -> DSSResult<()> {
   }
 
   match args.pop_front().unwrap().as_str() {
+    "help" | "--help" => {
+      println!("smolmesh2 - peer-to-peer mesh VPN");
+      println!();
+      println!("{executable} help");
+      println!("{executable} --help");
+      println!("    This help message");
+      println!();
+      println!("{executable} meshnode [config-file]");
+      println!("    Runs the mesh node with the specified configuration file");
+      println!();
+      println!("{executable} name-to-ipv6 [node-name]");
+      println!("    Converts a node name to its corresponding IPv6 address");
+      println!();
+      println!("{executable} make-random-ipv4");
+      println!("    Generates a random IPv4 address");
+      println!();
+      println!("{executable} make-random-ipv6");
+      println!("    Generates a random IPv6 address");
+    }
     "meshnode" => {
       run_meshnode(&mut args).await;
     }
