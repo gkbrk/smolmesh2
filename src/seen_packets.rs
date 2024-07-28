@@ -7,20 +7,9 @@ pub(crate) struct SeenPackets {
 
 impl SeenPackets {
   pub(crate) fn new(n: usize) -> Self {
-    let buckets = {
-      let mut res = Vec::new();
+    let buckets = vec![0; n];
 
-      for _ in 0..n {
-        res.push(0);
-      }
-
-      res
-    };
-
-    Self {
-      buckets,
-      n,
-    }
+    Self { buckets, n }
   }
 
   pub(crate) fn add(&mut self, packet: &[u8]) {

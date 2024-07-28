@@ -43,6 +43,7 @@ impl AllSenders {
         log!("Error sending to fastest: {:?}", x);
       }
     } else {
+      log!("Could not find fastest route, sending through random");
       self.send_to_random(data);
     }
   }

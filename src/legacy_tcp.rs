@@ -1,5 +1,9 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::os::fd::{AsFd, AsRawFd};
+use std::u32::MAX;
+
+use windows_sys::Win32::Foundation::OSS_MORE_BUF;
 
 use crate::leo_async;
 use crate::{all_senders, log};
@@ -81,119 +85,51 @@ impl KeystreamGen {
   }
 }
 
-// #[cfg(unix)]
-// fn poll_readable(sock: &socket2::Socket, timeout_ms: usize) -> DSSResult<()> {
-//   use std::os::fd::AsRawFd;
-
-//   let read_or_error = nix::poll::PollFlags::POLLIN
-//     | nix::poll::PollFlags::POLLERR
-//     | nix::poll::PollFlags::POLLHUP
-//     | nix::poll::PollFlags::POLLNVAL;
-
-//   let fd = sock.as_raw_fd();
-//   let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
-//   let pollfd = nix::poll::PollFd::new(fd, read_or_error);
-//   let res = nix::poll::poll(&mut [pollfd], timeout_ms as u16)?;
-
-//   if res <= 0 {
-//     return Err("poll failed".into());
-//   }
-
-//   Ok(())
-// }
-
-#[cfg(unix)]
-async fn poll_readable(sock: &socket2::Socket, timeout_ms: usize) -> DSSResult<()> {
-  use std::os::fd::AsRawFd;
-
-  let read_or_error = nix::poll::PollFlags::POLLIN
-    | nix::poll::PollFlags::POLLERR
-    | nix::poll::PollFlags::POLLHUP
-    | nix::poll::PollFlags::POLLNVAL;
-
-  let fd = sock.as_raw_fd();
-  let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
-  let pollfd = nix::poll::PollFd::new(fd, read_or_error);
-
-  let res = leo_async::fn_thread_future(move || nix::poll::poll(&mut [pollfd], timeout_ms as u16)).await?;
-
-  if res <= 0 {
-    return Err("poll failed".into());
-  }
-
-  Ok(())
-}
-
-#[cfg(windows)]
-fn poll_readable(sock: &socket2::Socket, timeout_ms: usize) -> DSSResult<()> {
-  use std::{borrow::BorrowMut, os::windows::io::AsRawSocket};
-
-  let mut pollfd = windows_sys::Win32::Networking::WinSock::WSAPOLLFD {
-    fd: sock.as_raw_socket().try_into()?,
-    events: windows_sys::Win32::Networking::WinSock::POLLIN,
-    revents: 0,
-  };
-
-  let res = unsafe { windows_sys::Win32::Networking::WinSock::WSAPoll(pollfd.borrow_mut(), 1, timeout_ms as i32) };
-
-  if res == 0 {
-    return Err("Timeout".into());
-  } else if res < 0 {
-    let error_code = unsafe { windows_sys::Win32::Networking::WinSock::WSAGetLastError() };
-    return Err(format!("WSAPoll failed with error code {}", error_code).into());
-  }
-
-  Ok(())
-}
-
-async fn readexact_timeout(sock: &mut socket2::Socket, buf: &mut [u8], timeout_ms: usize) -> DSSResult<()> {
+async fn fd_readexact(fd: i32, buf: &mut [u8]) -> DSSResult<()> {
   let mut read = 0;
+  let l = buf.len();
 
-  while read < buf.len() {
-    poll_readable(sock, timeout_ms).await?;
-    let res = sock.read(&mut buf[read..])?;
+  while read < l {
+    let res = leo_async::read_fd(fd, &mut buf[read..]).await?;
     read += res;
 
     if res == 0 {
-      return Err("read failed".into());
+      return Err("Read failed".into());
     }
   }
 
   Ok(())
 }
 
-async fn socket2_write_all(sock: socket2::Socket, buf: &[u8]) -> DSSResult<socket2::Socket> {
-  let buf = buf.to_owned();
-  let mut sock = sock;
-  let task = leo_async::fn_thread_future(move || {
-    sock.write_all(&buf)?;
-    Ok(sock)
-  });
-
-  let task = leo_async::timeout_future(task, std::time::Duration::from_secs(5));
-
-  match task.await {
-    Ok(Ok(sock)) => Ok(sock),
-    Ok(Err(x)) => Err(x),
-    Err(_x) => Err("".into()),
-  }
+async fn fd_readexact_timeout(fd: i32, buf: &mut [u8], timeout_ms: usize) -> DSSResult<()> {
+  let read = fd_readexact(fd, buf);
+  // let read = std::pin::pin!(read);
+  // leo_async::timeout_future(read, std::time::Duration::from_millis(timeout_ms as u64)).await??;
+  read.await?;
+  Ok(())
 }
 
-async fn socket2_flush(sock: socket2::Socket) -> DSSResult<socket2::Socket> {
-  let mut sock = sock;
+async fn fd_writeall(fd: i32, buf: &[u8]) -> DSSResult<()> {
+  let mut written = 0;
+  let l = buf.len();
 
-  let task = leo_async::fn_thread_future(move || {
-    sock.flush()?;
-    DSSResult::Ok(sock)
-  });
+  while written < l {
+    let res = leo_async::write_fd(fd, &buf[written..]).await?;
+    written += res;
 
-  let task = leo_async::timeout_future(task, std::time::Duration::from_secs(5));
-
-  match task.await {
-    Ok(Ok(sock)) => Ok(sock),
-    Ok(Err(x)) => Err(x),
-    Err(_) => Err("Flush operation timed out".into()),
+    if res == 0 {
+      return Err("Write failed".into());
+    }
   }
+
+  Ok(())
+}
+
+async fn fd_writeall_timeout(fd: i32, buf: &[u8], timeout_ms: usize) -> DSSResult<()> {
+  let write = fd_writeall(fd, buf);
+  let write = std::pin::pin!(write);
+  leo_async::timeout_future(write, std::time::Duration::from_millis(timeout_ms as u64)).await??;
+  Ok(())
 }
 
 async fn connect_impl(
@@ -208,9 +144,13 @@ async fn connect_impl(
     Some(socket2::Protocol::TCP),
   )?;
 
+  sock.set_nonblocking(true)?;
+
+  let fd = sock.as_fd().as_raw_fd();
+
   let addr: std::net::SocketAddr = format!("{}:{}", host, port).parse()?;
 
-  crate::log!("Connecting");
+  crate::log!("Connecting to {}:{}", host, port);
   sock = leo_async::fn_thread_future(move || {
     match sock.connect_timeout(&addr.into(), std::time::Duration::from_secs(5)) {
       Ok(it) => it,
@@ -220,6 +160,8 @@ async fn connect_impl(
   })
   .await?;
   crate::log!("Connected to {:?}", addr);
+
+  sock.set_nonblocking(true)?;
 
   let all_senders = all_senders::get();
 
@@ -232,11 +174,8 @@ async fn connect_impl(
 
   let keyfinder = crate::speck::multispeck3(key, &sender_iv, b"keyfinder");
 
-  let mut sock_write = sock.try_clone()?;
-
-  sock_write = socket2_write_all(sock_write, &sender_iv).await?;
-  sock_write = socket2_write_all(sock_write, &keyfinder).await?;
-  sock_write = socket2_flush(sock_write).await?;
+  fd_writeall_timeout(fd, &sender_iv, 30_000).await?;
+  fd_writeall_timeout(fd, &keyfinder, 30_000).await?;
 
   let (sender_tx, sender_rx) = leo_async::mpsc::channel();
 
@@ -247,7 +186,6 @@ async fn connect_impl(
 
   let send_task = {
     async move {
-      let sender_rx = sender_rx;
       let mut keystream = KeystreamGen::new(&send_enc_key);
 
       loop {
@@ -272,10 +210,13 @@ async fn connect_impl(
           ciphertext_data.push(byte ^ keystream_byte);
         }
 
-        sock_write = match socket2_write_all(sock_write, &ciphertext_data).await {
-          Ok(sock_write) => sock_write,
-          Err(_) => return,
-        };
+        match fd_writeall_timeout(fd, &ciphertext_data, 30_000).await {
+          Ok(_) => {}
+          Err(e) => {
+            crate::log!("connect_impl send_task write error: {}", e);
+            return;
+          }
+        }
       }
     }
   };
@@ -285,19 +226,18 @@ async fn connect_impl(
 
     async move {
       let key = &key;
-      let mut sock = sock.try_clone()?;
 
       let recv_iv = {
-        let mut iv = [0u8; 16];
-        readexact_timeout(&mut sock, &mut iv, 30000).await?;
-        iv
+        let mut buf = [0u8; 16];
+        fd_readexact_timeout(fd, &mut buf, 30_000).await?;
+        buf
       };
 
       let expected_keyfinder = crate::speck::multispeck3(key, &recv_iv, b"keyfinder");
       let recv_keyfinder = {
-        let mut keyfinder = [0u8; 16];
-        readexact_timeout(&mut sock, &mut keyfinder, 30000).await?;
-        keyfinder
+        let mut buf = [0u8; 16];
+        fd_readexact_timeout(fd, &mut buf, 30000).await?;
+        buf
       };
 
       assert_eq!(expected_keyfinder, Vec::from(recv_keyfinder));
@@ -309,8 +249,8 @@ async fn connect_impl(
 
       let mut keystream = KeystreamGen::new(&recv_enc_key);
 
-      async fn read_exact(sock: &mut socket2::Socket, buf: &mut [u8]) -> DSSResult<()> {
-        if readexact_timeout(sock, buf, 30000).await.is_err() {
+      async fn read_exact(sock: &mut socket2::Socket, fd: i32, buf: &mut [u8]) -> DSSResult<()> {
+        if fd_readexact_timeout(fd, buf, 30000).await.is_err() {
           sock.shutdown(std::net::Shutdown::Both)?;
           return Err("read_exact failed".into());
         }
@@ -321,21 +261,21 @@ async fn connect_impl(
       loop {
         // Read and decrypt length
         let mut len_buf = [0u8; 2];
-        read_exact(&mut sock, &mut len_buf).await?;
+        read_exact(&mut sock, fd, &mut len_buf).await?;
         len_buf[0] ^= keystream.next();
         len_buf[1] ^= keystream.next();
         let len = u16::from_le_bytes(len_buf);
 
         // Read and decrypt data
         let mut data = vec![0u8; len as usize];
-        read_exact(&mut sock, &mut data).await?;
+        read_exact(&mut sock, fd, &mut data).await?;
         for byte in &mut data {
           *byte ^= keystream.next();
         }
 
         // Read and decrypt MAC
         let mut mac = [0u8; 16];
-        read_exact(&mut sock, &mut mac).await?;
+        read_exact(&mut sock, fd, &mut mac).await?;
         for byte in &mut mac {
           *byte ^= keystream.next();
         }
@@ -356,7 +296,7 @@ async fn connect_impl(
 
   let (res1, res2) = leo_async::join2(send_task, recv_task).await;
 
-  crate::log!("res1: {:?}, res2: {:?}", res1, res2);
+  crate::log!("connect_impl res1: {:?}, res2: {:?}", res1, res2);
 
   Ok(())
 }
@@ -386,57 +326,6 @@ pub fn create_connection(
   });
 }
 
-async fn tcpstream_write_all(s: TcpStream, buf: &[u8]) -> DSSResult<TcpStream> {
-  let buf = buf.to_owned();
-  let mut s = s;
-  let task = leo_async::fn_thread_future(move || {
-    s.write_all(&buf)?;
-    Ok(s)
-  });
-
-  let task = leo_async::timeout_future(task, std::time::Duration::from_secs(5));
-
-  match task.await {
-    Ok(Ok(s)) => Ok(s),
-    Ok(Err(x)) => Err(x),
-    Err(_) => Err("Write operation timed out".into()),
-  }
-}
-
-async fn tcpstream_flush(s: TcpStream) -> DSSResult<TcpStream> {
-  let mut s = s;
-  let task = leo_async::fn_thread_future(move || {
-    s.flush()?;
-    Ok(s)
-  });
-
-  let task = leo_async::timeout_future(task, std::time::Duration::from_secs(5));
-
-  match task.await {
-    Ok(Ok(s)) => Ok(s),
-    Ok(Err(x)) => Err(x),
-    Err(_) => Err("Flush operation timed out".into()),
-  }
-}
-
-async fn tcpstream_readexact(s: TcpStream, size: usize) -> DSSResult<(TcpStream, Vec<u8>)> {
-  let mut s = s;
-
-  let task = leo_async::fn_thread_future(move || {
-    let mut buf = vec![0u8; size];
-    s.read_exact(&mut buf)?;
-    Ok((s, buf))
-  });
-
-  let task = leo_async::timeout_future(task, std::time::Duration::from_secs(30));
-
-  match task.await {
-    Ok(Ok(s)) => Ok(s),
-    Ok(Err(x)) => Err(x),
-    Err(_) => Err("Read operation timed out".into()),
-  }
-}
-
 pub async fn handle_connection(
   keys: Vec<Vec<u8>>,
   conn: std::net::TcpStream,
@@ -444,18 +333,22 @@ pub async fn handle_connection(
 ) -> DSSResult<()> {
   let all_senders = all_senders::get();
   let conn = conn;
-  conn.set_write_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
-  conn.set_read_timeout(Some(std::time::Duration::from_secs(30))).unwrap();
-  conn.set_nodelay(true).unwrap();
+  conn.set_nonblocking(true)?;
+  conn.set_nodelay(true)?;
 
-  let mut write_conn = conn.try_clone().unwrap();
-  let mut read_conn = conn.try_clone().unwrap();
+  let fd = conn.as_raw_fd();
 
-  let (_read_conn, incoming_iv) = tcpstream_readexact(read_conn, 16).await?;
-  read_conn = _read_conn;
+  let incoming_iv = {
+    let mut buf = [0u8; 16];
+    fd_readexact_timeout(fd, &mut buf, 30_000).await?;
+    buf
+  };
 
-  let (_read_conn, incoming_keyfinder) = tcpstream_readexact(read_conn, 16).await?;
-  read_conn = _read_conn;
+  let incoming_keyfinder = {
+    let mut buf = [0u8; 16];
+    fd_readexact_timeout(fd, &mut buf, 30_000).await?;
+    buf
+  };
 
   let mut found_key = None;
 
@@ -487,9 +380,8 @@ pub async fn handle_connection(
 
   let send_keyfinder = crate::speck::multispeck3(&found_key, &send_iv, b"keyfinder");
 
-  write_conn = tcpstream_write_all(write_conn, &send_iv).await?;
-  write_conn = tcpstream_write_all(write_conn, &send_keyfinder).await?;
-  write_conn = tcpstream_flush(write_conn).await?;
+  fd_writeall_timeout(fd, &send_iv, 30_000).await?;
+  fd_writeall_timeout(fd, &send_keyfinder, 30_000).await?;
 
   let send_enc_key = crate::speck::multispeck3(&found_key, &send_iv, b"enc_key");
   let send_mac_key = crate::speck::multispeck3(&found_key, &send_iv, b"mac_key");
@@ -522,13 +414,8 @@ pub async fn handle_connection(
           ciphertext_data.push(byte ^ keystream_byte);
         }
 
-        write_conn = match tcpstream_write_all(write_conn, &ciphertext_data).await {
-          Ok(write_conn) => write_conn,
-          Err(_) => return,
-        };
-
-        write_conn = match tcpstream_flush(write_conn).await {
-          Ok(write_conn) => write_conn,
+        match fd_writeall_timeout(fd, &ciphertext_data, 30_000).await {
+          Ok(_) => {}
           Err(_) => return,
         }
       }
@@ -541,22 +428,23 @@ pub async fn handle_connection(
 
       loop {
         // Read and decrypt length
-        let (_read_conn, mut len_buf) = tcpstream_readexact(read_conn, 2).await?;
-        read_conn = _read_conn;
+        let mut len_buf = [0u8; 2];
+        fd_readexact_timeout(fd, &mut len_buf, 30_000).await?;
         len_buf[0] ^= keystream.next();
         len_buf[1] ^= keystream.next();
         let len = u16::from_le_bytes(len_buf.try_into().unwrap());
 
         // Read and decrypt data
-        let (_read_conn, mut data) = tcpstream_readexact(read_conn, len as usize).await?;
-        read_conn = _read_conn;
+        let mut data = Vec::with_capacity(len as usize);
+        data.resize(len as usize, 0);
+        fd_readexact_timeout(fd, &mut data, 30_000).await?;
         for byte in &mut data {
           *byte ^= keystream.next();
         }
 
         // Read and decrypt MAC
-        let (_read_conn, mut mac) = tcpstream_readexact(read_conn, 16).await?;
-        read_conn = _read_conn;
+        let mut mac = [0u8; 16];
+        fd_readexact_timeout(fd, &mut mac, 30_000).await?;
         for byte in &mut mac {
           *byte ^= keystream.next();
         }

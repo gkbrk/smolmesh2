@@ -4,6 +4,7 @@ extern crate lazy_static;
 use std::{
   collections::{HashSet, VecDeque},
   io::Write,
+  sync::{atomic::AtomicUsize, LazyLock},
 };
 
 use leo_async::DSSResult;
@@ -23,6 +24,12 @@ mod speck;
 mod windows_tuntap;
 #[cfg(windows)]
 mod wintun;
+
+static DBGIDGEN: LazyLock<AtomicUsize> = LazyLock::new(|| AtomicUsize::new(0));
+
+fn gen_id() -> usize {
+  DBGIDGEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+}
 
 fn millis() -> u64 {
   let now = std::time::SystemTime::now();
@@ -159,8 +166,8 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
   }
 
   loop {
-    leo_async::yield_now().await;
     let (data, _sender) = receiver.recv().await.unwrap();
+    // crate::log!("Got {:?}", data);
 
     // First 8 bytes are the milliseconds since epoch
     let ms = u64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]);
@@ -186,6 +193,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
     match cmd {
       0 => {
         if let Ok(packet_node_name) = std::str::from_utf8(data) {
+          crate::log!("Got node name flood for {}", packet_node_name);
           let addr = crate::ip_addr::IpAddr::from_node_name(packet_node_name);
           all_senders.add_fastest_to(ms, addr, _sender);
 

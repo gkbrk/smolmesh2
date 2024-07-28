@@ -1,6 +1,7 @@
 use std::{
   future::Future,
   num::NonZeroUsize,
+  os::fd::BorrowedFd,
   pin::Pin,
   sync::{Arc, LazyLock, Mutex, RwLock},
   task::{Poll, Waker},
@@ -38,6 +39,38 @@ static EXECUTOR: LazyLock<Executor> = LazyLock::new(|| {
     task_sender: RwLock::new(Some(task_sender)),
   }
 });
+
+static EPOLL_REGISTER: LazyLock<mpsc::Sender<(i32, epoll::PollType, Waker)>> = LazyLock::new(|| epoll::epoll_task());
+
+pub(super) fn read_fd(fd: i32, buf: &mut [u8]) -> impl Future<Output = DSSResult<usize>> + '_ {
+  std::future::poll_fn(move |cx| match nix::unistd::read(fd, buf) {
+    Ok(n) => Poll::Ready(Ok(n)),
+    Err(nix::errno::Errno::EAGAIN) => {
+      EPOLL_REGISTER
+        .send((fd, epoll::PollType::Read, cx.waker().clone()))
+        .unwrap();
+      Poll::Pending
+    }
+    Err(e) => Poll::Ready(Err(e.into())),
+  })
+}
+
+pub(super) fn write_fd(fd: i32, buf: &[u8]) -> impl Future<Output = DSSResult<usize>> + '_ {
+  std::future::poll_fn(move |cx| {
+    let rawfd = fd;
+    let fd = unsafe { BorrowedFd::borrow_raw(fd) };
+    match nix::unistd::write(fd, buf) {
+      Ok(n) => Poll::Ready(Ok(n)),
+      Err(nix::errno::Errno::EAGAIN) => {
+        EPOLL_REGISTER
+          .send((rawfd, epoll::PollType::Write, cx.waker().clone()))
+          .unwrap();
+        Poll::Pending
+      }
+      Err(e) => Poll::Ready(Err(e.into())),
+    }
+  })
+}
 
 pub(super) fn spawn<F, T>(future: F)
 where
@@ -146,9 +179,18 @@ fn run_forever() {
       let waker = std::task::Waker::from(task.clone());
       let context = &mut std::task::Context::from_waker(&waker);
 
+      let start = std::time::Instant::now();
+
       if future.as_mut().poll(context).is_pending() {
         // Not done, put it back
         *future_slot = Some(future);
+      }
+
+      let elapsed = start.elapsed();
+
+      if elapsed > std::time::Duration::from_millis(500) {
+        eprintln!("Task took too long: {:?}", elapsed);
+        std::process::abort();
       }
     }
   }
@@ -334,13 +376,13 @@ impl<F, T> Future for TimeoutFuture<F, T>
 where
   F: Future<Output = T> + Unpin,
 {
-  type Output = std::result::Result<T, ()>;
+  type Output = DSSResult<T>;
 
   fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context) -> std::task::Poll<Self::Output> {
     let now = std::time::Instant::now();
 
     if now >= self.timeout_at {
-      return std::task::Poll::Ready(Err(()));
+      return std::task::Poll::Ready(Err("Timeout".into()));
     }
 
     let timeout_at = self.timeout_at;
@@ -421,3 +463,95 @@ where
     future2_result: None,
   }
 }
+
+mod epoll {
+  use std::{
+    collections::HashMap,
+    os::fd::BorrowedFd,
+    sync::{Arc, Mutex},
+    task::Waker,
+  };
+
+  use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags, EpollTimeout};
+
+  #[derive(PartialEq, Eq, Hash, Debug)]
+  pub enum PollType {
+    Read,
+    Write,
+  }
+
+  type WakerHashMap = HashMap<(i32, PollType), Waker>;
+
+  pub fn epoll_task() -> super::mpsc::Sender<(i32, PollType, Waker)> {
+    let (sender, receiver) = super::mpsc::channel();
+    let epoll = Arc::new(Epoll::new(EpollCreateFlags::empty()).unwrap());
+    let waker_hashmap: Arc<Mutex<WakerHashMap>> = Arc::new(Mutex::new(HashMap::new()));
+
+    // Registerer
+    super::spawn(epoll_register_task(epoll.clone(), waker_hashmap.clone(), receiver));
+
+    // Waker
+    std::thread::spawn(move || epoll_waker_task(epoll.clone(), waker_hashmap.clone()));
+
+    sender
+  }
+
+  fn epoll_waker_task(epoll: Arc<Epoll>, waker_hashmap: Arc<Mutex<WakerHashMap>>) {
+    loop {
+      let mut events = [EpollEvent::empty(); 128];
+      let epoll = epoll.clone();
+
+      let n = epoll.wait(&mut events, EpollTimeout::NONE).unwrap();
+
+      let mut waker_hashmap = waker_hashmap.lock().unwrap();
+
+      for event in events.iter().take(n) {
+        let fd = event.data() as i32;
+        let event = event.events();
+
+        if event.contains(EpollFlags::EPOLLIN) {
+          if let Some(waker) = waker_hashmap.remove(&(fd, PollType::Read)) {
+            waker.wake();
+          }
+        }
+
+        if event.contains(EpollFlags::EPOLLOUT) {
+          if let Some(waker) = waker_hashmap.remove(&(fd, PollType::Write)) {
+            waker.wake();
+          }
+        }
+      }
+    }
+  }
+
+  async fn epoll_register_task(
+    epoll: Arc<Epoll>,
+    waker_hashmap: Arc<Mutex<WakerHashMap>>,
+    receiver: super::mpsc::Receiver<(i32, PollType, Waker)>,
+  ) {
+    while let Some((fd, polltype, waker)) = receiver.recv().await {
+      let flags = match polltype {
+        PollType::Read => nix::sys::epoll::EpollFlags::EPOLLIN | nix::sys::epoll::EpollFlags::EPOLLONESHOT,
+        PollType::Write => nix::sys::epoll::EpollFlags::EPOLLOUT | nix::sys::epoll::EpollFlags::EPOLLONESHOT,
+      };
+
+      let _ = waker_hashmap.lock().unwrap().insert((fd, polltype), waker);
+
+      let rawfd = fd;
+      let fd = unsafe { BorrowedFd::borrow_raw(fd) };
+
+      let mut ev = EpollEvent::new(flags, rawfd as u64);
+
+      match epoll.modify(fd, &mut ev) {
+        Ok(_) => {}
+        // If the file descriptor is not found in the epoll instance, add it instead of modifying.
+        Err(nix::errno::Errno::ENOENT) => epoll.add(fd, ev).unwrap(),
+        Err(e) => {
+          panic!("epoll modify error");
+        }
+      }
+    }
+  }
+}
+
+mod socket2 {}

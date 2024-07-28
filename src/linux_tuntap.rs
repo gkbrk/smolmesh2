@@ -40,7 +40,7 @@ unsafe fn nix_libc_open(path: &str) -> i32 {
   #[cfg(target_arch = "aarch64")]
   let path = path.as_ptr() as *const u8;
 
-  libc::open(path, libc::O_RDWR)
+  libc::open(path, libc::O_RDWR | libc::O_NONBLOCK)
 }
 
 impl TunInterface {
@@ -113,20 +113,18 @@ impl TunInterface {
     // tun -> network
     {
       let fd = self.fd.clone();
-      std::thread::spawn(move || {
+
+      leo_async::spawn(async move {
         let all_senders = crate::all_senders::get();
         let fd = fd.clone();
         loop {
-          let mut packet = Vec::<u8>::with_capacity(2048);
-
-          let amount = unsafe {
-            match libc::read(fd.fd(), packet.as_mut_ptr().cast(), packet.capacity() as usize) {
-              -1 => {
-                println!("Error reading from tun: {}", std::io::Error::last_os_error());
-                continue;
-              }
-              0 => break,
-              x => x,
+          let mut packet = vec![0; 2048];
+          let amount = match leo_async::read_fd(fd.fd(), &mut packet).await {
+            Ok(0) => break,
+            Ok(x) => x,
+            Err(e) => {
+              crate::log!("TUN read error: {}", e);
+              continue;
             }
           };
 
