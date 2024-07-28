@@ -339,8 +339,6 @@ where
   fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context) -> std::task::Poll<Self::Output> {
     let now = std::time::Instant::now();
 
-    crate::log!("{:?} {:?}", now, self.timeout_at);
-
     if now >= self.timeout_at {
       return std::task::Poll::Ready(Err(()));
     }

@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::process::Output;
 
 use crate::leo_async;
@@ -163,11 +164,45 @@ async fn readexact_timeout(sock: &mut socket2::Socket, buf: &mut [u8], timeout_m
   Ok(())
 }
 
+async fn socket2_write_all(sock: socket2::Socket, buf: &[u8]) -> DSSResult<socket2::Socket> {
+  let buf = buf.to_owned();
+  let mut sock = sock;
+  let task = leo_async::fn_thread_future(move || {
+    sock.write_all(&buf)?;
+    Ok(sock)
+  });
+
+  let task = leo_async::timeout_future(task, std::time::Duration::from_secs(5));
+
+  match task.await {
+    Ok(Ok(sock)) => Ok(sock),
+    Ok(Err(x)) => Err(x),
+    Err(_x) => Err("".into()),
+  }
+}
+
+async fn socket2_flush(sock: socket2::Socket) -> DSSResult<socket2::Socket> {
+  let mut sock = sock;
+
+  let task = leo_async::fn_thread_future(move || {
+    sock.flush()?;
+    DSSResult::Ok(sock)
+  });
+
+  let task = leo_async::timeout_future(task, std::time::Duration::from_secs(5));
+
+  match task.await {
+    Ok(Ok(sock)) => Ok(sock),
+    Ok(Err(x)) => Err(x),
+    Err(_) => Err("Flush operation timed out".into()),
+  }
+}
+
 async fn connect_impl(
   host: &str,
   port: u16,
   key: &[u8],
-  incoming: crossbeam::channel::Sender<(Vec<u8>, crossbeam::channel::Sender<Vec<u8>>)>,
+  incoming: leo_async::mpsc::Sender<(Vec<u8>, leo_async::mpsc::Sender<Vec<u8>>)>,
 ) -> DSSResult<()> {
   let mut sock = socket2::Socket::new(
     socket2::Domain::IPV4,
@@ -188,10 +223,8 @@ async fn connect_impl(
   .await?;
   crate::log!("Connected to {:?}", addr);
 
-  sock.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
-  sock.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
-
-  sock.set_nodelay(true)?;
+  let mut sock_read = sock.try_clone()?;
+  let mut sock_write = sock.try_clone()?;
 
   let all_senders = all_senders::get();
 
@@ -204,11 +237,11 @@ async fn connect_impl(
 
   let keyfinder = crate::speck::multispeck3(key, &sender_iv, b"keyfinder");
 
-  sock.write_all(&sender_iv)?;
-  sock.write_all(&keyfinder)?;
-  sock.flush()?;
+  sock_write = socket2_write_all(sock_write, &sender_iv).await?;
+  sock_write = socket2_write_all(sock_write, &keyfinder).await?;
+  sock_write = socket2_flush(sock_write).await?;
 
-  let (sender_tx, sender_rx) = crossbeam::channel::unbounded();
+  let (sender_tx, sender_rx) = leo_async::mpsc::channel();
 
   all_senders.add(sender_tx.clone());
 
@@ -223,13 +256,7 @@ async fn connect_impl(
       let mut keystream = KeystreamGen::new(&send_enc_key);
 
       loop {
-        let res = leo_async::fn_thread_future(move || {
-          let res = sender_rx.recv().unwrap();
-          (res, sender_rx)
-        })
-        .await;
-        let data = res.0;
-        sender_rx = res.1;
+        let data = sender_rx.recv().await.unwrap();
 
         // Empty data means there is a cleaner checking the channel
         if data.is_empty() {
@@ -250,23 +277,10 @@ async fn connect_impl(
           ciphertext_data.push(byte ^ keystream_byte);
         }
 
-        {
-          let mut pos = 0;
-
-          while pos < ciphertext_data.len() {
-            let amt = sock.send(&ciphertext_data[pos..]);
-
-            if let Ok(0) = amt {
-              sock.shutdown(std::net::Shutdown::Both)?;
-              return Err::<(), Box<dyn Error + Send + Sync>>("Could not write".into());
-            } else if let Ok(amt) = amt {
-              pos += amt;
-            } else {
-              sock.shutdown(std::net::Shutdown::Both)?;
-              return Err("Could not write".into());
-            }
-          }
-        }
+        sock_write = match socket2_write_all(sock_write, &ciphertext_data).await {
+          Ok(sock_write) => sock_write,
+          Err(_) => return,
+        };
       }
     }
   };
@@ -336,7 +350,7 @@ async fn connect_impl(
         assert_eq!(expected_mac, Vec::from(mac));
 
         if let Err(err) = incoming.send((data, sender_tx.clone())) {
-          log!("Error sending data: {}", err);
+          log!("Error sending data: {:?}", err);
           break;
         }
       }
@@ -356,7 +370,7 @@ pub fn create_connection(
   host: &str,
   port: u16,
   key: &[u8],
-  incoming: crossbeam::channel::Sender<(Vec<u8>, crossbeam::channel::Sender<Vec<u8>>)>,
+  incoming: leo_async::mpsc::Sender<(Vec<u8>, leo_async::mpsc::Sender<Vec<u8>>)>,
 ) {
   let host = host.to_owned();
   let key = key.to_owned();
@@ -377,28 +391,76 @@ pub fn create_connection(
   });
 }
 
-pub fn handle_connection(
+async fn tcpstream_write_all(s: TcpStream, buf: &[u8]) -> DSSResult<TcpStream> {
+  let buf = buf.to_owned();
+  let mut s = s;
+  let task = leo_async::fn_thread_future(move || {
+    s.write_all(&buf)?;
+    Ok(s)
+  });
+
+  let task = leo_async::timeout_future(task, std::time::Duration::from_secs(5));
+
+  match task.await {
+    Ok(Ok(s)) => Ok(s),
+    Ok(Err(x)) => Err(x),
+    Err(_) => Err("Write operation timed out".into()),
+  }
+}
+
+async fn tcpstream_flush(s: TcpStream) -> DSSResult<TcpStream> {
+  let mut s = s;
+  let task = leo_async::fn_thread_future(move || {
+    s.flush()?;
+    Ok(s)
+  });
+
+  let task = leo_async::timeout_future(task, std::time::Duration::from_secs(5));
+
+  match task.await {
+    Ok(Ok(s)) => Ok(s),
+    Ok(Err(x)) => Err(x),
+    Err(_) => Err("Flush operation timed out".into()),
+  }
+}
+
+async fn tcpstream_readexact(s: TcpStream, size: usize) -> DSSResult<(TcpStream, Vec<u8>)> {
+  let mut s = s;
+
+  let task = leo_async::fn_thread_future(move || {
+    let mut buf = vec![0u8; size];
+    s.read_exact(&mut buf)?;
+    Ok((s, buf))
+  });
+
+  let task = leo_async::timeout_future(task, std::time::Duration::from_secs(30));
+
+  match task.await {
+    Ok(Ok(s)) => Ok(s),
+    Ok(Err(x)) => Err(x),
+    Err(_) => Err("Read operation timed out".into()),
+  }
+}
+
+pub async fn handle_connection(
   keys: Vec<Vec<u8>>,
   conn: std::net::TcpStream,
-  incoming: crossbeam::channel::Sender<(Vec<u8>, crossbeam::channel::Sender<Vec<u8>>)>,
-) {
+  incoming: leo_async::mpsc::Sender<(Vec<u8>, leo_async::mpsc::Sender<Vec<u8>>)>,
+) -> DSSResult<()> {
   let all_senders = all_senders::get();
   let mut conn = conn;
   conn.set_write_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
   conn.set_read_timeout(Some(std::time::Duration::from_secs(30))).unwrap();
   conn.set_nodelay(true).unwrap();
 
-  let incoming_iv = {
-    let mut iv = [0u8; 16];
-    conn.read_exact(&mut iv).unwrap();
-    iv
-  };
+  let mut write_conn = conn.try_clone().unwrap();
+  let mut read_conn = conn.try_clone().unwrap();
 
-  let incoming_keyfinder = {
-    let mut keyfinder = [0u8; 16];
-    conn.read_exact(&mut keyfinder).unwrap();
-    keyfinder
-  };
+  let (_read_conn, incoming_iv) = tcpstream_readexact(read_conn, 16).await?;
+  read_conn = _read_conn;
+
+  let (_read_conn, incoming_keyfinder) = tcpstream_readexact(read_conn, 16).await?;
+  read_conn = _read_conn;
 
   let mut found_key = None;
 
@@ -412,8 +474,7 @@ pub fn handle_connection(
   }
 
   if found_key.is_none() {
-    println!("Got incorrect keyfinder");
-    return;
+    return Err("Got incorrect keyfinder".into());
   }
 
   let found_key = found_key.unwrap();
@@ -431,23 +492,23 @@ pub fn handle_connection(
 
   let send_keyfinder = crate::speck::multispeck3(&found_key, &send_iv, b"keyfinder");
 
-  conn.write_all(&send_iv).unwrap();
-  conn.write_all(&send_keyfinder).unwrap();
+  write_conn = tcpstream_write_all(write_conn, &send_iv).await?;
+  write_conn = tcpstream_write_all(write_conn, &send_keyfinder).await?;
+  write_conn = tcpstream_flush(write_conn).await?;
 
   let send_enc_key = crate::speck::multispeck3(&found_key, &send_iv, b"enc_key");
   let send_mac_key = crate::speck::multispeck3(&found_key, &send_iv, b"mac_key");
 
-  let (sender_tx, sender_rx) = crossbeam::channel::unbounded();
+  let (sender_tx, sender_rx) = leo_async::mpsc::channel();
   all_senders.add(sender_tx.clone());
 
-  crossbeam::thread::scope(move |s| {
+  let sender_task = {
     let mut sender_sock = conn.try_clone().unwrap();
-
-    // Sender
-    s.spawn(move |_| {
+    async move {
       let mut keystream = KeystreamGen::new(&send_enc_key);
 
-      for packet in sender_rx {
+      loop {
+        let packet = sender_rx.recv().await.unwrap();
         // Empty data means there is a cleaner checking the channel
         if packet.is_empty() {
           continue;
@@ -467,35 +528,42 @@ pub fn handle_connection(
           ciphertext_data.push(byte ^ keystream_byte);
         }
 
-        sender_sock.write_all(&ciphertext_data).unwrap();
-        sender_sock.flush().unwrap();
+        write_conn = match tcpstream_write_all(write_conn, &ciphertext_data).await {
+          Ok(write_conn) => write_conn,
+          Err(_) => return,
+        };
+
+        write_conn = match tcpstream_flush(write_conn).await {
+          Ok(write_conn) => write_conn,
+          Err(_) => return,
+        }
       }
-    });
+    }
+  };
 
+  let recv_task = {
     let mut receiver_sock = conn.try_clone().unwrap();
-
-    // Receiver
-    s.spawn(move |_| {
+    async move {
       let mut keystream = KeystreamGen::new(&recv_enc_key);
 
       loop {
         // Read and decrypt length
-        let mut len_buf = [0u8; 2];
-        receiver_sock.read_exact(&mut len_buf).unwrap();
+        let (_read_conn, mut len_buf) = tcpstream_readexact(read_conn, 2).await?;
+        read_conn = _read_conn;
         len_buf[0] ^= keystream.next();
         len_buf[1] ^= keystream.next();
-        let len = u16::from_le_bytes(len_buf);
+        let len = u16::from_le_bytes(len_buf.try_into().unwrap());
 
         // Read and decrypt data
-        let mut data = vec![0u8; len as usize];
-        receiver_sock.read_exact(&mut data).unwrap();
+        let (_read_conn, mut data) = tcpstream_readexact(read_conn, len as usize).await?;
+        read_conn = _read_conn;
         for byte in &mut data {
           *byte ^= keystream.next();
         }
 
         // Read and decrypt MAC
-        let mut mac = [0u8; 16];
-        receiver_sock.read_exact(&mut mac).unwrap();
+        let (_read_conn, mut mac) = tcpstream_readexact(read_conn, 16).await?;
+        read_conn = _read_conn;
         for byte in &mut mac {
           *byte ^= keystream.next();
         }
@@ -506,15 +574,20 @@ pub fn handle_connection(
 
         incoming.send((data, sender_tx.clone())).unwrap();
       }
-    });
-  })
-  .unwrap();
+    }
+  };
+
+  let res: ((), Result<(), Box<dyn std::error::Error + Send + Sync>>) = leo_async::join2(sender_task, recv_task).await;
+
+  crate::log!("Connection tasks completed: {:?}", res);
+
+  Ok(())
 }
 
 pub fn listener_impl(
   port: u16,
   keys: Vec<Vec<u8>>,
-  incoming: crossbeam::channel::Sender<(Vec<u8>, crossbeam::channel::Sender<Vec<u8>>)>,
+  incoming: leo_async::mpsc::Sender<(Vec<u8>, leo_async::mpsc::Sender<Vec<u8>>)>,
 ) -> DResult<()> {
   let listener = std::net::TcpListener::bind(("0.0.0.0", port))?;
 
@@ -525,9 +598,7 @@ pub fn listener_impl(
 
     crate::log!("Incoming connection: {:?}", x);
 
-    std::thread::spawn(move || {
-      handle_connection(keys, x, incoming);
-    });
+    leo_async::spawn(handle_connection(keys, x, incoming));
   }
 
   Ok(())
@@ -536,7 +607,7 @@ pub fn listener_impl(
 pub fn listener(
   port: u16,
   keys: Vec<Vec<u8>>,
-  incoming: crossbeam::channel::Sender<(Vec<u8>, crossbeam::channel::Sender<Vec<u8>>)>,
+  incoming: leo_async::mpsc::Sender<(Vec<u8>, leo_async::mpsc::Sender<Vec<u8>>)>,
 ) {
   std::thread::spawn(move || loop {
     let incoming = incoming.clone();

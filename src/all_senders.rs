@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
 
-use crate::log;
+use crate::{leo_async, log};
 
 pub struct AllSenders {
-  senders: RwLock<Vec<crossbeam::channel::Sender<Vec<u8>>>>,
-  fastest_to_address: RwLock<HashMap<crate::ip_addr::IpAddr, (u64, crossbeam::channel::Sender<Vec<u8>>)>>,
+  senders: RwLock<Vec<leo_async::mpsc::Sender<Vec<u8>>>>,
+  fastest_to_address: RwLock<HashMap<crate::ip_addr::IpAddr, (u64, leo_async::mpsc::Sender<Vec<u8>>)>>,
 }
 
 static S_ALLSENDERS: OnceLock<AllSenders> = OnceLock::new();
@@ -18,12 +18,12 @@ pub fn get() -> &'static AllSenders {
 }
 
 impl AllSenders {
-  pub fn add(&self, sender: crossbeam::channel::Sender<Vec<u8>>) {
+  pub fn add(&self, sender: leo_async::mpsc::Sender<Vec<u8>>) {
     let mut senders = self.senders.write().unwrap();
     senders.push(sender);
   }
 
-  pub fn add_fastest_to(&self, millis: u64, addr: crate::ip_addr::IpAddr, sender: crossbeam::channel::Sender<Vec<u8>>) {
+  pub fn add_fastest_to(&self, millis: u64, addr: crate::ip_addr::IpAddr, sender: leo_async::mpsc::Sender<Vec<u8>>) {
     let mut fastest_to_address = self.fastest_to_address.write().unwrap();
 
     if let Some((millis_old, _)) = fastest_to_address.get(&addr) {

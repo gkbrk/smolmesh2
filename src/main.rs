@@ -54,7 +54,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
 
   let mut seen_packets = seen_packets::SeenPackets::new(8128);
 
-  let (sender, mut receiver) = crossbeam::channel::unbounded();
+  let (sender, receiver) = leo_async::mpsc::channel();
 
   // Thread to broadcast our node. This allows all nodes in the network to
   // learn the path to us.
@@ -160,14 +160,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
 
   loop {
     leo_async::yield_now().await;
-    let res = leo_async::fn_thread_future(move || {
-      let res = receiver.recv().unwrap();
-      (res, receiver)
-    })
-    .await;
-    let data = res.0 .0;
-    let _sender = res.0 .1;
-    receiver = res.1;
+    let (data, _sender) = receiver.recv().await.unwrap();
 
     // First 8 bytes are the milliseconds since epoch
     let ms = u64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]);
