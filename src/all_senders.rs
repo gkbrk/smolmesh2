@@ -47,7 +47,9 @@ async fn all_senders_task(receiver: leo_async::mpsc::Receiver<AllSendersMessage>
           }
         });
 
-        info!("Cleaned {} broken senders", num_cleaned);
+        if num_cleaned > 0 {
+          info!("Cleaned {} broken senders", num_cleaned);
+        }
       }
     }
   }
