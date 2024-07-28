@@ -123,7 +123,7 @@ impl TunInterface {
             Ok(0) => break,
             Ok(x) => x,
             Err(e) => {
-              crate::log!("TUN read error: {}", e);
+              crate::warn!("TUN read error: {}", e);
               continue;
             }
           };
@@ -138,7 +138,7 @@ impl TunInterface {
             (4, 20..) => crate::ip_addr::IpAddr::ipv4_from_buf(&packet[16..20]),
             (6, 40..) => crate::ip_addr::IpAddr::ipv6_from_buf(&packet[24..40]),
             _ => {
-              println!("Invalid IP version and packet length: {} {}", ip_version, packet.len());
+              crate::warn!("Invalid IP version and packet length: {} {}", ip_version, packet.len());
               continue;
             }
           };

@@ -193,7 +193,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
     match cmd {
       0 => {
         if let Ok(packet_node_name) = std::str::from_utf8(data) {
-          crate::log!("Got node name flood for {}", packet_node_name);
+          debug!("Got node name flood for {}", packet_node_name);
           let addr = crate::ip_addr::IpAddr::from_node_name(packet_node_name);
           all_senders.add_fastest_to(ms, addr, _sender);
 
@@ -209,7 +209,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
       1 => {
         // Tracer packet that means "I handle this IPv6 address"
         if data.len() != 16 {
-          println!("Invalid IPv6 address length");
+          warn!("Invalid IPv6 address length");
           continue;
         }
         let addr = crate::ip_addr::IpAddr::ipv6_from_buf(data);
@@ -225,7 +225,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
       2 => {
         // Tracer packet that means "I handle this IPv4 address"
         if data.len() != 4 {
-          println!("Invalid IPv4 address length");
+          warn!("Invalid IPv4 address length");
           continue;
         }
         let addr = crate::ip_addr::IpAddr::ipv4_from_buf(data);
@@ -245,7 +245,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
           4 => crate::ip_addr::IpAddr::ipv4_from_buf(&data[16..20]),
           6 => crate::ip_addr::IpAddr::ipv6_from_buf(&data[24..40]),
           _ => {
-            println!("Invalid IP version: {}", ip_version);
+            warn!("Invalid IP version: {}", ip_version);
             continue;
           }
         };
@@ -260,7 +260,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
         }
       }
       _ => {
-        println!("Unknown command {}", cmd);
+        warn!("Unknown command {}", cmd);
       }
     }
   }
@@ -274,7 +274,7 @@ fn run_name_to_ipv6(args: &mut VecDeque<String>) {
 }
 
 async fn async_main() -> DSSResult<()> {
-  crate::log!("Entered async_main");
+  crate::info!("Entered async_main");
   leo_async::fn_thread_future(rng::init_rng).await;
 
   let mut args: VecDeque<String> = std::env::args().collect();
@@ -334,7 +334,7 @@ async fn async_main() -> DSSResult<()> {
 }
 
 fn main() {
-  crate::log!("Entered main");
+  crate::info!("Started smolmesh2");
   let async_main = async_main();
   // let async_main = leo_async::timeout_future(Box::pin(async_main), std::time::Duration::from_secs(15));
 

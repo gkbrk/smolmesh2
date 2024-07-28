@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
 
-use crate::{leo_async, log};
+use crate::{debug, error, leo_async, warn};
 
 pub struct AllSenders {
   senders: RwLock<Vec<leo_async::mpsc::Sender<Vec<u8>>>>,
@@ -40,10 +40,10 @@ impl AllSenders {
 
     if let Some((_, sender)) = fastest_to_address.get(&addr) {
       if let Err(x) = sender.send(data) {
-        log!("Error sending to fastest: {:?}", x);
+        error!("Error sending to fastest: {:?}", x);
       }
     } else {
-      log!("Could not find fastest route, sending through random");
+      warn!("Could not find fastest route, sending through random");
       self.send_to_random(data);
     }
   }
@@ -74,7 +74,7 @@ impl AllSenders {
     let len_new = senders.len();
 
     if len_orig != len_new {
-      println!("Cleaned {} broken senders", len_orig - len_new);
+      debug!("Cleaned {} broken senders", len_orig - len_new);
     }
   }
 

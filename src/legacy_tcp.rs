@@ -103,9 +103,8 @@ async fn fd_readexact(fd: i32, buf: &mut [u8]) -> DSSResult<()> {
 
 async fn fd_readexact_timeout(fd: i32, buf: &mut [u8], timeout_ms: usize) -> DSSResult<()> {
   let read = fd_readexact(fd, buf);
-  // let read = std::pin::pin!(read);
-  // leo_async::timeout_future(read, std::time::Duration::from_millis(timeout_ms as u64)).await??;
-  read.await?;
+  let read = std::pin::pin!(read);
+  leo_async::timeout_future(read, std::time::Duration::from_millis(timeout_ms as u64)).await??;
   Ok(())
 }
 
