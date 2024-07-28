@@ -1,5 +1,8 @@
+use std::error::Error;
 use std::io::{Read, Write};
+use std::process::Output;
 
+use crate::leo_async;
 use crate::{all_senders, log};
 
 type DResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -79,8 +82,29 @@ impl KeystreamGen {
   }
 }
 
+// #[cfg(unix)]
+// fn poll_readable(sock: &socket2::Socket, timeout_ms: usize) -> DSSResult<()> {
+//   use std::os::fd::AsRawFd;
+
+//   let read_or_error = nix::poll::PollFlags::POLLIN
+//     | nix::poll::PollFlags::POLLERR
+//     | nix::poll::PollFlags::POLLHUP
+//     | nix::poll::PollFlags::POLLNVAL;
+
+//   let fd = sock.as_raw_fd();
+//   let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+//   let pollfd = nix::poll::PollFd::new(fd, read_or_error);
+//   let res = nix::poll::poll(&mut [pollfd], timeout_ms as u16)?;
+
+//   if res <= 0 {
+//     return Err("poll failed".into());
+//   }
+
+//   Ok(())
+// }
+
 #[cfg(unix)]
-fn poll_readable(sock: &socket2::Socket, timeout_ms: usize) -> DSSResult<()> {
+async fn poll_readable(sock: &socket2::Socket, timeout_ms: usize) -> DSSResult<()> {
   use std::os::fd::AsRawFd;
 
   let read_or_error = nix::poll::PollFlags::POLLIN
@@ -91,7 +115,8 @@ fn poll_readable(sock: &socket2::Socket, timeout_ms: usize) -> DSSResult<()> {
   let fd = sock.as_raw_fd();
   let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
   let pollfd = nix::poll::PollFd::new(fd, read_or_error);
-  let res = nix::poll::poll(&mut [pollfd], timeout_ms as u16)?;
+
+  let res = leo_async::fn_thread_future(move || nix::poll::poll(&mut [pollfd], timeout_ms as u16)).await?;
 
   if res <= 0 {
     return Err("poll failed".into());
@@ -122,11 +147,11 @@ fn poll_readable(sock: &socket2::Socket, timeout_ms: usize) -> DSSResult<()> {
   Ok(())
 }
 
-fn readexact_timeout(sock: &mut socket2::Socket, buf: &mut [u8], timeout_ms: usize) -> DSSResult<()> {
+async fn readexact_timeout(sock: &mut socket2::Socket, buf: &mut [u8], timeout_ms: usize) -> DSSResult<()> {
   let mut read = 0;
 
   while read < buf.len() {
-    poll_readable(sock, timeout_ms)?;
+    poll_readable(sock, timeout_ms).await?;
     let res = sock.read(&mut buf[read..])?;
     read += res;
 
@@ -138,12 +163,12 @@ fn readexact_timeout(sock: &mut socket2::Socket, buf: &mut [u8], timeout_ms: usi
   Ok(())
 }
 
-fn connect_impl(
+async fn connect_impl(
   host: &str,
   port: u16,
   key: &[u8],
   incoming: crossbeam::channel::Sender<(Vec<u8>, crossbeam::channel::Sender<Vec<u8>>)>,
-) -> DResult<()> {
+) -> DSSResult<()> {
   let mut sock = socket2::Socket::new(
     socket2::Domain::IPV4,
     socket2::Type::STREAM,
@@ -152,7 +177,16 @@ fn connect_impl(
 
   let addr: std::net::SocketAddr = format!("{}:{}", host, port).parse()?;
 
-  sock.connect_timeout(&addr.into(), std::time::Duration::from_secs(5))?;
+  crate::log!("Connecting");
+  sock = leo_async::fn_thread_future(move || {
+    match sock.connect_timeout(&addr.into(), std::time::Duration::from_secs(5)) {
+      Ok(it) => it,
+      Err(err) => return Err(err),
+    };
+    Ok(sock)
+  })
+  .await?;
+  crate::log!("Connected to {:?}", addr);
 
   sock.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
   sock.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
@@ -172,6 +206,7 @@ fn connect_impl(
 
   sock.write_all(&sender_iv)?;
   sock.write_all(&keyfinder)?;
+  sock.flush()?;
 
   let (sender_tx, sender_rx) = crossbeam::channel::unbounded();
 
@@ -180,14 +215,21 @@ fn connect_impl(
   let send_enc_key = crate::speck::multispeck3(key, &sender_iv, b"enc_key");
   let send_mac_key = crate::speck::multispeck3(key, &sender_iv, b"mac_key");
 
-  crossbeam::thread::scope(|s| {
-    // Sender
-    let _ = s.spawn(|_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-      let sender_rx = sender_rx;
+  let send_task = {
+    let sock = sock.try_clone().unwrap();
+
+    async move {
+      let mut sender_rx = sender_rx;
       let mut keystream = KeystreamGen::new(&send_enc_key);
 
       loop {
-        let data = sender_rx.recv().unwrap();
+        let res = leo_async::fn_thread_future(move || {
+          let res = sender_rx.recv().unwrap();
+          (res, sender_rx)
+        })
+        .await;
+        let data = res.0;
+        sender_rx = res.1;
 
         // Empty data means there is a cleaner checking the channel
         if data.is_empty() {
@@ -216,7 +258,7 @@ fn connect_impl(
 
             if let Ok(0) = amt {
               sock.shutdown(std::net::Shutdown::Both)?;
-              return Err("Could not write".into());
+              return Err::<(), Box<dyn Error + Send + Sync>>("Could not write".into());
             } else if let Ok(amt) = amt {
               pos += amt;
             } else {
@@ -226,22 +268,26 @@ fn connect_impl(
           }
         }
       }
-    });
+    }
+  };
 
-    // Receiver
-    let _ = s.spawn(|_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  let recv_task = {
+    let key = key.to_owned();
+
+    async move {
+      let key = &key;
       let mut sock = sock.try_clone()?;
 
       let recv_iv = {
         let mut iv = [0u8; 16];
-        readexact_timeout(&mut sock, &mut iv, 30000)?;
+        readexact_timeout(&mut sock, &mut iv, 30000).await?;
         iv
       };
 
       let expected_keyfinder = crate::speck::multispeck3(key, &recv_iv, b"keyfinder");
       let recv_keyfinder = {
         let mut keyfinder = [0u8; 16];
-        readexact_timeout(&mut sock, &mut keyfinder, 30000)?;
+        readexact_timeout(&mut sock, &mut keyfinder, 30000).await?;
         keyfinder
       };
 
@@ -254,33 +300,33 @@ fn connect_impl(
 
       let mut keystream = KeystreamGen::new(&recv_enc_key);
 
-      let mut read_exact = |buf: &mut [u8]| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if readexact_timeout(&mut sock, buf, 30000).is_err() {
+      async fn read_exact(sock: &mut socket2::Socket, buf: &mut [u8]) -> DSSResult<()> {
+        if readexact_timeout(sock, buf, 30000).await.is_err() {
           sock.shutdown(std::net::Shutdown::Both)?;
           return Err("read_exact failed".into());
         }
 
         Ok(())
-      };
+      }
 
       loop {
         // Read and decrypt length
         let mut len_buf = [0u8; 2];
-        read_exact(&mut len_buf)?;
+        read_exact(&mut sock, &mut len_buf).await?;
         len_buf[0] ^= keystream.next();
         len_buf[1] ^= keystream.next();
         let len = u16::from_le_bytes(len_buf);
 
         // Read and decrypt data
         let mut data = vec![0u8; len as usize];
-        read_exact(&mut data)?;
+        read_exact(&mut sock, &mut data).await?;
         for byte in &mut data {
           *byte ^= keystream.next();
         }
 
         // Read and decrypt MAC
         let mut mac = [0u8; 16];
-        read_exact(&mut mac)?;
+        read_exact(&mut sock, &mut mac).await?;
         for byte in &mut mac {
           *byte ^= keystream.next();
         }
@@ -291,12 +337,17 @@ fn connect_impl(
 
         if let Err(err) = incoming.send((data, sender_tx.clone())) {
           log!("Error sending data: {}", err);
-          break Ok(());
+          break;
         }
       }
-    });
-  })
-  .map_err(|_| "thread panicked")?;
+
+      DSSResult::Ok(())
+    }
+  };
+
+  let (res1, res2) = leo_async::join2(send_task, recv_task).await;
+
+  crate::log!("res1: {:?}, res2: {:?}", res1, res2);
 
   Ok(())
 }
@@ -310,18 +361,19 @@ pub fn create_connection(
   let host = host.to_owned();
   let key = key.to_owned();
 
-  std::thread::spawn(move || loop {
-    let host = host.clone();
-    let key = key.clone();
-    let incoming = incoming.clone();
+  leo_async::spawn(async move {
+    loop {
+      let host = host.clone();
+      let key = key.clone();
+      let incoming = incoming.clone();
 
-    let res = connect_impl(&host, port, &key, incoming.clone());
+      let res = connect_impl(&host, port, &key, incoming.clone()).await;
 
-    println!("{:?}", res);
+      println!("{:?}", res);
 
-    let delay = 5.0 + crate::rng::uniform() * 5.0;
-
-    std::thread::sleep(std::time::Duration::from_secs_f64(delay));
+      let delay = 5.0 + crate::rng::uniform() * 5.0;
+      leo_async::sleep_seconds(delay).await;
+    }
   });
 }
 
@@ -470,6 +522,8 @@ pub fn listener_impl(
     let keys = keys.clone();
     let incoming = incoming.clone();
     let x = x?;
+
+    crate::log!("Incoming connection: {:?}", x);
 
     std::thread::spawn(move || {
       handle_connection(keys, x, incoming);

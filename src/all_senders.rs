@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
 
+use crate::log;
+
 pub struct AllSenders {
   senders: RwLock<Vec<crossbeam::channel::Sender<Vec<u8>>>>,
   fastest_to_address: RwLock<HashMap<crate::ip_addr::IpAddr, (u64, crossbeam::channel::Sender<Vec<u8>>)>>,
@@ -38,7 +40,7 @@ impl AllSenders {
 
     if let Some((_, sender)) = fastest_to_address.get(&addr) {
       if let Err(x) = sender.send(data) {
-        println!("Error sending to fastest: {:?}", x);
+        log!("Error sending to fastest: {:?}", x);
       }
     } else {
       self.send_to_random(data);

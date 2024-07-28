@@ -39,11 +39,16 @@ static EXECUTOR: LazyLock<Executor> = LazyLock::new(|| {
   }
 });
 
-pub(super) fn spawn<F>(future: F)
+pub(super) fn spawn<F, T>(future: F)
 where
-  F: Future<Output = ()> + Send + 'static,
+  F: Future<Output = T> + Send + 'static,
 {
   let sender = EXECUTOR.task_sender.read().unwrap().clone().unwrap();
+
+  let future = async {
+    _ = future.await;
+    ()
+  };
 
   let task = Arc::new(Task {
     future: Mutex::new(Some(Box::pin(future))),
@@ -79,6 +84,8 @@ where
 
     runners
   };
+
+  // run_forever();
 
   let res = result_receiver.recv().unwrap();
 
@@ -352,5 +359,67 @@ where
         Poll::Pending
       }
     }
+  }
+}
+
+// Join
+
+struct Join2Futures<F1, F2, T1, T2>
+where
+  F1: Future<Output = T1>,
+  F2: Future<Output = T2>,
+{
+  future1: F1,
+  future2: F2,
+  future1_result: Option<T1>,
+  future2_result: Option<T2>,
+}
+
+impl<F1, F2, T1, T2> Future for Join2Futures<F1, F2, T1, T2>
+where
+  F1: Future<Output = T1> + Unpin,
+  F2: Future<Output = T2> + Unpin,
+  T1: Unpin,
+  T2: Unpin,
+{
+  type Output = (T1, T2);
+
+  fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context) -> std::task::Poll<(T1, T2)> {
+    let this = self.get_mut();
+
+    if this.future1_result.is_none() {
+      match Pin::new(&mut this.future1).poll(cx) {
+        std::task::Poll::Ready(val) => this.future1_result = Some(val),
+        std::task::Poll::Pending => {}
+      }
+    }
+
+    if this.future2_result.is_none() {
+      match Pin::new(&mut this.future2).poll(cx) {
+        std::task::Poll::Ready(val) => this.future2_result = Some(val),
+        std::task::Poll::Pending => {}
+      }
+    }
+
+    if this.future1_result.is_none() || this.future2_result.is_none() {
+      return std::task::Poll::Pending;
+    }
+
+    std::task::Poll::Ready((this.future1_result.take().unwrap(), this.future2_result.take().unwrap()))
+  }
+}
+
+pub(super) fn join2<F1, F2, T1, T2>(future1: F1, future2: F2) -> impl Future<Output = (T1, T2)>
+where
+  F1: Future<Output = T1>,
+  F2: Future<Output = T2>,
+  T1: Unpin,
+  T2: Unpin,
+{
+  Join2Futures {
+    future1: Box::pin(future1),
+    future2: Box::pin(future2),
+    future1_result: None,
+    future2_result: None,
   }
 }
