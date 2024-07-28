@@ -1,7 +1,5 @@
-use std::error::Error;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::process::Output;
 
 use crate::leo_async;
 use crate::{all_senders, log};
@@ -223,9 +221,6 @@ async fn connect_impl(
   .await?;
   crate::log!("Connected to {:?}", addr);
 
-  let mut sock_read = sock.try_clone()?;
-  let mut sock_write = sock.try_clone()?;
-
   let all_senders = all_senders::get();
 
   let sender_iv = {
@@ -236,6 +231,8 @@ async fn connect_impl(
   };
 
   let keyfinder = crate::speck::multispeck3(key, &sender_iv, b"keyfinder");
+
+  let mut sock_write = sock.try_clone()?;
 
   sock_write = socket2_write_all(sock_write, &sender_iv).await?;
   sock_write = socket2_write_all(sock_write, &keyfinder).await?;
@@ -249,10 +246,8 @@ async fn connect_impl(
   let send_mac_key = crate::speck::multispeck3(key, &sender_iv, b"mac_key");
 
   let send_task = {
-    let sock = sock.try_clone().unwrap();
-
     async move {
-      let mut sender_rx = sender_rx;
+      let sender_rx = sender_rx;
       let mut keystream = KeystreamGen::new(&send_enc_key);
 
       loop {
@@ -448,7 +443,7 @@ pub async fn handle_connection(
   incoming: leo_async::mpsc::Sender<(Vec<u8>, leo_async::mpsc::Sender<Vec<u8>>)>,
 ) -> DSSResult<()> {
   let all_senders = all_senders::get();
-  let mut conn = conn;
+  let conn = conn;
   conn.set_write_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
   conn.set_read_timeout(Some(std::time::Duration::from_secs(30))).unwrap();
   conn.set_nodelay(true).unwrap();
@@ -503,7 +498,6 @@ pub async fn handle_connection(
   all_senders.add(sender_tx.clone());
 
   let sender_task = {
-    let mut sender_sock = conn.try_clone().unwrap();
     async move {
       let mut keystream = KeystreamGen::new(&send_enc_key);
 
@@ -542,7 +536,6 @@ pub async fn handle_connection(
   };
 
   let recv_task = {
-    let mut receiver_sock = conn.try_clone().unwrap();
     async move {
       let mut keystream = KeystreamGen::new(&recv_enc_key);
 
