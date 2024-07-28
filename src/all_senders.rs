@@ -1,86 +1,90 @@
 use std::collections::HashMap;
-use std::sync::{OnceLock, RwLock};
+use std::sync::LazyLock;
 
-use crate::{debug, error, leo_async, warn};
+use crate::{info, ip_addr, leo_async};
 
-pub struct AllSenders {
-  senders: RwLock<Vec<leo_async::mpsc::Sender<Vec<u8>>>>,
-  fastest_to_address: RwLock<HashMap<crate::ip_addr::IpAddr, (u64, leo_async::mpsc::Sender<Vec<u8>>)>>,
+enum AllSendersMessage {
+  AddSender(leo_async::mpsc::Sender<Vec<u8>>),
+  AddFastestTo(u64, ip_addr::IpAddr, leo_async::mpsc::Sender<Vec<u8>>),
+  SendToFastest(ip_addr::IpAddr, Vec<u8>),
+  SendToAll(Vec<u8>),
+  CleanBrokenSenders,
 }
 
-static S_ALLSENDERS: OnceLock<AllSenders> = OnceLock::new();
+async fn all_senders_task(receiver: leo_async::mpsc::Receiver<AllSendersMessage>) {
+  let mut senders: Vec<leo_async::mpsc::Sender<Vec<u8>>> = Vec::new();
+  let mut fastest_to_address: HashMap<ip_addr::IpAddr, (u64, leo_async::mpsc::Sender<Vec<u8>>)> = HashMap::new();
+
+  while let Some(msg) = receiver.recv().await {
+    match msg {
+      AllSendersMessage::AddSender(sender) => senders.push(sender),
+      AllSendersMessage::AddFastestTo(millis, addr, sender) => {
+        if let Some((millis_old, _)) = fastest_to_address.get(&addr) {
+          if millis <= *millis_old {
+            continue;
+          }
+        }
+        fastest_to_address.insert(addr, (millis, sender));
+      }
+      AllSendersMessage::SendToFastest(addr, data) => {
+        if let Some((_, sender)) = fastest_to_address.get(&addr) {
+          _ = sender.send(data);
+        }
+      }
+      AllSendersMessage::SendToAll(data) => {
+        for sender in senders.iter() {
+          _ = sender.send(data.clone());
+        }
+      }
+      AllSendersMessage::CleanBrokenSenders => {
+        let mut num_cleaned = 0usize;
+
+        senders.retain(|x| match x.send(Vec::new()) {
+          Ok(_) => true,
+          Err(_) => {
+            num_cleaned += 1;
+            false
+          }
+        });
+
+        info!("Cleaned {} broken senders", num_cleaned);
+      }
+    }
+  }
+}
+
+pub struct AllSenders {
+  sender: leo_async::mpsc::Sender<AllSendersMessage>,
+}
+
+static ALLSENDERS: LazyLock<AllSenders> = LazyLock::new(|| {
+  let (sender, receiver) = leo_async::mpsc::channel();
+  leo_async::spawn(all_senders_task(receiver));
+  AllSenders { sender }
+});
 
 pub fn get() -> &'static AllSenders {
-  S_ALLSENDERS.get_or_init(|| AllSenders {
-    senders: RwLock::new(Vec::new()),
-    fastest_to_address: RwLock::new(HashMap::new()),
-  })
+  &ALLSENDERS
 }
 
 impl AllSenders {
   pub fn add(&self, sender: leo_async::mpsc::Sender<Vec<u8>>) {
-    let mut senders = self.senders.write().unwrap();
-    senders.push(sender);
+    _ = self.sender.send(AllSendersMessage::AddSender(sender));
   }
 
   pub fn add_fastest_to(&self, millis: u64, addr: crate::ip_addr::IpAddr, sender: leo_async::mpsc::Sender<Vec<u8>>) {
-    let mut fastest_to_address = self.fastest_to_address.write().unwrap();
-
-    if let Some((millis_old, _)) = fastest_to_address.get(&addr) {
-      if millis <= *millis_old {
-        return;
-      }
-    }
-
-    fastest_to_address.insert(addr, (millis, sender));
+    _ = self.sender.send(AllSendersMessage::AddFastestTo(millis, addr, sender));
   }
 
   pub fn send_to_fastest(&self, addr: crate::ip_addr::IpAddr, data: Vec<u8>) {
-    let fastest_to_address = self.fastest_to_address.read().unwrap();
-
-    if let Some((_, sender)) = fastest_to_address.get(&addr) {
-      if let Err(x) = sender.send(data) {
-        error!("Error sending to fastest: {:?}", x);
-      }
-    } else {
-      warn!("Could not find fastest route, sending through random");
-      self.send_to_random(data);
-    }
-  }
-
-  pub fn send_to_random(&self, data: Vec<u8>) {
-    let senders = self.senders.read().unwrap();
-
-    if senders.is_empty() {
-      return;
-    }
-
-    let len = senders.len();
-    let idx = crate::rng::u64() as usize % len;
-
-    let _ = senders[idx].send(data);
+    _ = self.sender.send(AllSendersMessage::SendToFastest(addr, data));
   }
 
   pub fn clean_broken_senders(&self) {
-    let mut senders = self.senders.write().unwrap();
-
-    let len_orig = senders.len();
-
-    senders.retain(|sender| {
-      let res = sender.send(Vec::new());
-      res.is_ok()
-    });
-
-    let len_new = senders.len();
-
-    if len_orig != len_new {
-      debug!("Cleaned {} broken senders", len_orig - len_new);
-    }
+    _ = self.sender.send(AllSendersMessage::CleanBrokenSenders);
   }
 
   pub fn send_all(&self, data: Vec<u8>) {
-    for sender in self.senders.read().unwrap().iter() {
-      let _ = sender.send(data.clone());
-    }
+    _ = self.sender.send(AllSendersMessage::SendToAll(data));
   }
 }
