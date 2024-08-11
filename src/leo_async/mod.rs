@@ -196,8 +196,7 @@ fn run_forever() {
       let elapsed = start.elapsed();
 
       if elapsed > std::time::Duration::from_millis(500) {
-        eprintln!("Task took too long: {:?}", elapsed);
-        std::process::abort();
+        panic!("Task took too long: {:?}", elapsed);
       }
     }
   }

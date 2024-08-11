@@ -85,6 +85,26 @@ impl KeystreamGen {
   }
 }
 
+fn arcfd(fd: i32) -> std::sync::Arc<impl AsRawFd> {
+  struct X {
+    fd: i32,
+  }
+
+  impl AsRawFd for X {
+    fn as_raw_fd(&self) -> std::os::unix::prelude::RawFd {
+      self.fd
+    }
+  }
+
+  impl Drop for X {
+    fn drop(&mut self) {
+      let _ = unsafe { libc::close(self.fd) };
+    }
+  }
+
+  std::sync::Arc::new(X { fd })
+}
+
 async fn fd_readexact(fd: i32, buf: &mut [u8]) -> DSSResult<()> {
   let mut read = 0;
   let l = buf.len();
