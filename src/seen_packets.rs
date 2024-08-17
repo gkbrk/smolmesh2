@@ -2,29 +2,28 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 pub(crate) struct SeenPackets {
   buckets: Vec<u64>,
-  n: usize,
 }
 
 impl SeenPackets {
   pub(crate) fn new(n: usize) -> Self {
-    let buckets = vec![0; n];
-
-    Self { buckets, n }
+    Self { buckets: vec![0; n] }
   }
 
-  pub(crate) fn add(&mut self, packet: &[u8]) {
+  #[inline(always)]
+  fn bucket_and_hash(&self, packet: &[u8]) -> (usize, u64) {
     let mut hasher = DefaultHasher::new();
     packet.hash(&mut hasher);
     let hash = hasher.finish();
-    let bucket = hash as usize % self.n;
+    (hash as usize % self.buckets.len(), hash)
+  }
+
+  pub(crate) fn add(&mut self, packet: &[u8]) {
+    let (bucket, hash) = self.bucket_and_hash(packet);
     self.buckets[bucket] = hash;
   }
 
   pub(crate) fn contains(&self, packet: &[u8]) -> bool {
-    let mut hasher = DefaultHasher::new();
-    packet.hash(&mut hasher);
-    let hash = hasher.finish();
-    let bucket = hash as usize % self.n;
+    let (bucket, hash) = self.bucket_and_hash(packet);
     self.buckets[bucket] == hash
   }
 }
