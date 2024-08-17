@@ -41,7 +41,7 @@ static EXECUTOR: LazyLock<Executor> = LazyLock::new(|| {
   }
 });
 
-static EPOLL_REGISTER: LazyLock<mpsc::Sender<(i32, epoll::PollType, Waker)>> = LazyLock::new(|| epoll::epoll_task());
+static EPOLL_REGISTER: LazyLock<mpsc::Sender<(i32, epoll::PollType, Waker)>> = LazyLock::new(epoll::epoll_task);
 
 static SLEEP_REGISTER: LazyLock<std::sync::mpsc::Sender<(Instant, Box<Waker>)>> = LazyLock::new(|| {
   let (sender, receiver) = std::sync::mpsc::channel();

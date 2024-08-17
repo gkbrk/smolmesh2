@@ -1,10 +1,5 @@
-use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
-use std::u32::MAX;
-
-use windows_sys::Win32::Foundation::OSS_MORE_BUF;
 
 use crate::leo_async;
 use crate::{all_senders, log};
@@ -463,11 +458,10 @@ pub async fn handle_connection(
         fd_readexact_timeout(read_sock.as_raw_fd(), &mut len_buf, 30_000).await?;
         len_buf[0] ^= keystream.next();
         len_buf[1] ^= keystream.next();
-        let len = u16::from_le_bytes(len_buf.try_into().unwrap());
+        let len = u16::from_le_bytes(len_buf);
 
         // Read and decrypt data
-        let mut data = Vec::with_capacity(len as usize);
-        data.resize(len as usize, 0);
+        let mut data = vec![0u8; len as usize];
         fd_readexact_timeout(read_sock.as_raw_fd(), &mut data, 30_000).await?;
         for byte in &mut data {
           *byte ^= keystream.next();
