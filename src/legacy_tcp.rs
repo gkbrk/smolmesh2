@@ -480,10 +480,12 @@ pub async fn handle_connection(
 
         incoming.send((data, sender_tx.clone())).unwrap();
       }
+
+      DSSResult::Ok(())
     }
   };
 
-  let res: ((), Result<(), Box<dyn std::error::Error + Send + Sync>>) = leo_async::join2(sender_task, recv_task).await;
+  let res = leo_async::select2_noresult(sender_task, recv_task).await;
 
   crate::log!("Connection tasks completed: {:?}", res);
 

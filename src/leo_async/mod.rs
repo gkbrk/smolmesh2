@@ -404,6 +404,38 @@ where
   }
 }
 
+pub(super) fn select2_noresult<F1: Future, F2: Future>(f1: F1, f2: F2) -> impl Future<Output = ()> {
+  struct Select2Future<F1, F2> {
+    f1: F1,
+    f2: F2,
+  }
+
+  impl<F1: Future + Unpin, F2: Future + Unpin> Future for Select2Future<F1, F2> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context) -> std::task::Poll<Self::Output> {
+      let this = self.get_mut();
+
+      let f1 = Pin::new(&mut this.f1);
+      let f2 = Pin::new(&mut this.f2);
+
+      let poll1 = f1.poll(cx);
+      let poll2 = f2.poll(cx);
+
+      if poll1.is_ready() || poll2.is_ready() {
+        Poll::Ready(())
+      } else {
+        Poll::Pending
+      }
+    }
+  }
+
+  Select2Future {
+    f1: Box::pin(f1),
+    f2: Box::pin(f2),
+  }
+}
+
 // Join
 
 struct Join2Futures<F1, F2, T1, T2>
@@ -616,5 +648,40 @@ mod sleep {
         sleep_queue.push(InstantAndWaker(instant, waker));
       }
     }
+  }
+}
+
+pub(super) fn fused<T>(future: impl Future<Output = T> + Unpin) -> impl Future<Output = T> {
+  struct Fused<F, T>
+  where
+    F: Future<Output = T>,
+  {
+    future: F,
+    resolved: bool,
+  }
+
+  impl<F: Future<Output = T> + Unpin, T> Future for Fused<F, T> {
+    type Output = T;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context) -> Poll<Self::Output> {
+      let this = self.get_mut();
+
+      if this.resolved {
+        panic!("Future polled after completion");
+      }
+
+      match Pin::new(&mut this.future).poll(cx) {
+        Poll::Ready(v) => {
+          this.resolved = true;
+          Poll::Ready(v)
+        }
+        Poll::Pending => Poll::Pending,
+      }
+    }
+  }
+
+  Fused {
+    future,
+    resolved: false,
   }
 }
