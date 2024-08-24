@@ -45,7 +45,12 @@ static EPOLL_REGISTER: LazyLock<mpsc::Sender<(i32, epoll::PollType, Waker)>> = L
 
 static SLEEP_REGISTER: LazyLock<std::sync::mpsc::Sender<(Instant, Box<Waker>)>> = LazyLock::new(|| {
   let (sender, receiver) = std::sync::mpsc::channel();
-  std::thread::spawn(|| sleep::sleep_task(receiver));
+
+  std::thread::Builder::new()
+    .name("sleep-task".to_string())
+    .spawn(|| sleep::sleep_task(receiver))
+    .expect("Failed to spawn sleep task");
+
   sender
 });
 
