@@ -12,8 +12,8 @@ use crossbeam::atomic::AtomicCell;
 
 pub(super) type DSSResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-pub(super) struct Task {
-  pub(super) future: Mutex<Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>>,
+struct Task {
+  future: Mutex<Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>>,
   sender: crossbeam::channel::Sender<Arc<Task>>,
 }
 
@@ -28,7 +28,7 @@ impl std::task::Wake for Task {
   }
 }
 
-pub(super) struct Executor {
+struct Executor {
   task_receiver: crossbeam::channel::Receiver<Arc<Task>>,
   task_sender: RwLock<Option<crossbeam::channel::Sender<Arc<Task>>>>,
 }
@@ -124,8 +124,6 @@ where
 
     runners
   };
-
-  // run_forever();
 
   let res = result_receiver.recv().unwrap();
 
@@ -336,6 +334,26 @@ pub(super) mod mpsc {
   }
 }
 
+pub(super) fn yield_now() -> impl Future<Output = ()> {
+  struct X(bool);
+
+  impl Future for X {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context) -> Poll<Self::Output> {
+      if self.0 {
+        Poll::Ready(())
+      } else {
+        self.0 = true;
+        cx.waker().wake_by_ref();
+        Poll::Pending
+      }
+    }
+  }
+
+  X(false)
+}
+
 pub(super) struct TimeoutFuture<F, T>
 where
   F: Future<Output = T>,
@@ -352,26 +370,6 @@ where
     future,
     timeout_at: std::time::Instant::now() + timeout,
   }
-}
-
-struct YieldFuture(bool);
-
-impl Future for YieldFuture {
-  type Output = ();
-
-  fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context) -> Poll<Self::Output> {
-    if self.0 {
-      Poll::Ready(())
-    } else {
-      self.0 = true;
-      cx.waker().wake_by_ref();
-      Poll::Pending
-    }
-  }
-}
-
-pub(super) fn yield_now() -> impl Future<Output = ()> {
-  YieldFuture(false)
 }
 
 impl<F, T> Future for TimeoutFuture<F, T>
