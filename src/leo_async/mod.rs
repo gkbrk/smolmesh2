@@ -122,6 +122,7 @@ where
     let parallelism = std::thread::available_parallelism()
       .unwrap_or(NonZeroUsize::new(8).unwrap())
       .get();
+    let parallelism = 1;
 
     for _ in 0..parallelism {
       let t = std::thread::spawn(run_forever);
@@ -192,9 +193,18 @@ fn run_forever() {
 
       let start = std::time::Instant::now();
 
+      unsafe {
+        // Polling something should not take more than 5 seconds, otherwise it's a bug
+        libc::alarm(5);
+      }
+
       if future.as_mut().poll(context).is_pending() {
         // Not done, put it back
         *future_slot = Some(future);
+      }
+
+      unsafe {
+        libc::alarm(0);
       }
 
       let elapsed = start.elapsed();
