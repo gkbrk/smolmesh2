@@ -92,7 +92,6 @@ where
 
   let future = async {
     _ = future.await;
-    ()
   };
 
   let task = Arc::new(Task {
@@ -584,7 +583,7 @@ mod epoll {
         // If the file descriptor is not found in the epoll instance, add it instead of modifying.
         Err(nix::errno::Errno::ENOENT) => epoll.add(fd, ev).unwrap(),
         Err(e) => {
-          panic!("epoll modify error");
+          panic!("epoll modify failed: {:?}", e);
         }
       }
     }
@@ -654,6 +653,11 @@ mod sleep {
   }
 }
 
+/// Creates a future that will panic if polled after it has completed.
+///
+/// Rust futures are supposed to be polled until completion, and not polled after they return `Poll::Ready`. When people
+/// write futures, they assume that this contract is upheld. But bugs happen, so we can wrap a future in this function
+/// to catch futures that are polled after completion, and panic.
 pub(super) fn fused<T>(future: impl Future<Output = T> + Unpin) -> impl Future<Output = T> {
   struct Fused<F, T>
   where
