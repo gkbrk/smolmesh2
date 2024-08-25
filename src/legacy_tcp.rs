@@ -316,9 +316,9 @@ async fn connect_impl(
     }
   };
 
-  let (res1, res2) = leo_async::join2(send_task, recv_task).await;
+  leo_async::select2_noresult(send_task, recv_task).await;
 
-  crate::log!("connect_impl res1: {:?}, res2: {:?}", res1, res2);
+  crate::info!("Conenction finished");
 
   Ok(())
 }

@@ -10,6 +10,8 @@ use std::{
 
 use crossbeam::atomic::AtomicCell;
 
+use crate::trace;
+
 pub(super) type DSSResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 struct Task {
@@ -386,6 +388,7 @@ where
     let now = std::time::Instant::now();
 
     if now >= self.timeout_at {
+      trace!("A future timed out");
       return std::task::Poll::Ready(Err("Timeout".into()));
     }
 
