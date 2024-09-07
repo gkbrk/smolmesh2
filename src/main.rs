@@ -31,6 +31,7 @@ fn millis() -> u64 {
 }
 
 async fn run_meshnode(args: &mut VecDeque<String>) {
+  leo_async::update_task_backtrace();
   let config_path = args.pop_front().unwrap();
   let config_file = std::fs::read_to_string(config_path).unwrap();
   let config = json::parse(&config_file).unwrap();
@@ -39,6 +40,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
   let mut our_ips = HashSet::new();
 
   leo_async::spawn(async {
+    leo_async::update_task_backtrace();
     loop {
       all_senders.clean_broken_senders();
 

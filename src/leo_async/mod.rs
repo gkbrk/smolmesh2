@@ -17,6 +17,35 @@ pub(super) type DSSResult<T> = std::result::Result<T, Box<dyn std::error::Error 
 struct Task {
   future: Mutex<Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>>,
   sender: crossbeam::channel::Sender<Arc<Task>>,
+  context: Mutex<String>,
+}
+
+thread_local! {
+  static CURRENT_TASK: std::cell::RefCell<Option<Arc<Task>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn set_current(task: Arc<Task>) {
+  CURRENT_TASK.with(|current| {
+    *current.borrow_mut() = Some(task);
+  });
+}
+
+fn current() -> Option<Arc<Task>> {
+  CURRENT_TASK.with(|current| current.borrow().clone())
+}
+
+pub fn update_task_backtrace() {
+  if let Some(task) = current() {
+    let backtrace = std::backtrace::Backtrace::force_capture();
+    let mut context = task.context.lock().unwrap();
+    *context = backtrace.to_string();
+  }
+}
+
+fn clear_current() {
+  CURRENT_TASK.with(|current| {
+    *current.borrow_mut() = None;
+  });
 }
 
 impl std::task::Wake for Task {
@@ -99,6 +128,7 @@ where
   let task = Arc::new(Task {
     future: Mutex::new(Some(Box::pin(future))),
     sender: sender.clone(),
+    context: Mutex::new(std::backtrace::Backtrace::force_capture().to_string()),
   });
 
   sender.send(task).unwrap();
@@ -198,10 +228,14 @@ fn run_forever() {
         libc::alarm(5);
       }
 
+      set_current(task.clone());
+
       if future.as_mut().poll(context).is_pending() {
         // Not done, put it back
         *future_slot = Some(future);
       }
+
+      clear_current();
 
       unsafe {
         libc::alarm(0);
@@ -209,8 +243,12 @@ fn run_forever() {
 
       let elapsed = start.elapsed();
 
-      if elapsed > std::time::Duration::from_millis(500) {
-        panic!("Task took too long: {:?}", elapsed);
+      if elapsed > std::time::Duration::from_millis(100) {
+        crate::error!(
+          "Task took too long: {:?}. Context: {:?}",
+          elapsed,
+          task.context.lock().unwrap()
+        );
       }
     }
   }

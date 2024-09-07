@@ -115,6 +115,7 @@ impl TunInterface {
       let fd = self.fd.clone();
 
       leo_async::spawn(async move {
+        leo_async::update_task_backtrace();
         let all_senders = crate::all_senders::get();
         let fd = fd.clone();
         loop {
@@ -158,6 +159,7 @@ impl TunInterface {
     {
       let fd = self.fd.clone();
       leo_async::spawn(async move {
+        leo_async::update_task_backtrace();
         loop {
           if let Some(packet) = receiver.recv().await {
             unsafe {

@@ -1,7 +1,7 @@
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
 
-use crate::leo_async;
+use crate::leo_async::{self};
 use crate::{all_senders, log};
 
 type DResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -82,6 +82,7 @@ impl KeystreamGen {
 }
 
 async fn fd_readexact(fd: i32, buf: &mut [u8]) -> DSSResult<()> {
+  fd_assert_nonblocking(&fd);
   let mut read = 0;
   let l = buf.len();
 
@@ -105,6 +106,7 @@ async fn fd_readexact_timeout(fd: i32, buf: &mut [u8], timeout_ms: usize) -> DSS
 }
 
 async fn fd_writeall(fd: i32, buf: &[u8]) -> DSSResult<()> {
+  fd_assert_nonblocking(&fd);
   let mut written = 0;
   let l = buf.len();
 
@@ -143,6 +145,20 @@ fn fd_make_nonblocking(fd: &impl AsRawFd) -> DSSResult<()> {
   Ok(())
 }
 
+fn fd_assert_nonblocking(fd: &impl AsRawFd) {
+  let fd = fd.as_raw_fd();
+  let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+  if flags == -1 {
+    eprintln!("fcntl failed");
+    std::process::exit(1);
+  }
+
+  if (flags & libc::O_NONBLOCK) == 0 {
+    eprintln!("fd is not nonblocking");
+    std::process::exit(1);
+  }
+}
+
 fn dup(fd: &impl AsRawFd) -> DSSResult<impl AsRawFd> {
   let fd = fd.as_raw_fd();
   let res = unsafe { libc::dup(fd) };
@@ -158,6 +174,7 @@ async fn connect_impl(
   key: &[u8],
   incoming: leo_async::mpsc::Sender<(Vec<u8>, leo_async::mpsc::Sender<Vec<u8>>)>,
 ) -> DSSResult<()> {
+  leo_async::update_task_backtrace();
   let sock = {
     let mut sock = socket2::Socket::new(
       socket2::Domain::IPV4,
@@ -217,6 +234,7 @@ async fn connect_impl(
 
   let send_task = {
     async move {
+      leo_async::update_task_backtrace();
       let mut keystream = KeystreamGen::new(&send_enc_key);
 
       loop {
@@ -256,6 +274,7 @@ async fn connect_impl(
     let key = key.to_owned();
 
     async move {
+      leo_async::update_task_backtrace();
       let key = &key;
 
       let recv_iv = {
