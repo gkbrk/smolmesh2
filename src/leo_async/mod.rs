@@ -10,42 +10,13 @@ use std::{
 
 use crossbeam::atomic::AtomicCell;
 
-use crate::trace;
+use crate::{error, trace};
 
 pub(super) type DSSResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 struct Task {
   future: Mutex<Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>>,
   sender: crossbeam::channel::Sender<Arc<Task>>,
-  context: Mutex<String>,
-}
-
-thread_local! {
-  static CURRENT_TASK: std::cell::RefCell<Option<Arc<Task>>> = const { std::cell::RefCell::new(None) };
-}
-
-fn set_current(task: Arc<Task>) {
-  CURRENT_TASK.with(|current| {
-    *current.borrow_mut() = Some(task);
-  });
-}
-
-fn current() -> Option<Arc<Task>> {
-  CURRENT_TASK.with(|current| current.borrow().clone())
-}
-
-pub fn update_task_backtrace() {
-  if let Some(task) = current() {
-    let backtrace = std::backtrace::Backtrace::force_capture();
-    let mut context = task.context.lock().unwrap();
-    *context = backtrace.to_string();
-  }
-}
-
-fn clear_current() {
-  CURRENT_TASK.with(|current| {
-    *current.borrow_mut() = None;
-  });
 }
 
 impl std::task::Wake for Task {
@@ -85,9 +56,17 @@ static SLEEP_REGISTER: LazyLock<std::sync::mpsc::Sender<(Instant, Box<Waker>)>> 
   sender
 });
 
+fn check_fd_nonblocking(fd: i32) {
+  let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+  if flags & libc::O_NONBLOCK == 0 {
+    error!("File descriptor is not non-blocking");
+    std::process::exit(1);
+  }
+}
+
 pub(super) fn read_fd(fd: i32, buf: &mut [u8]) -> impl Future<Output = DSSResult<usize>> + '_ {
   std::future::poll_fn(move |cx| {
-    update_task_backtrace();
+    check_fd_nonblocking(fd);
     match nix::unistd::read(fd, buf) {
       Ok(n) => Poll::Ready(Ok(n)),
       Err(nix::errno::Errno::EAGAIN) => {
@@ -103,7 +82,7 @@ pub(super) fn read_fd(fd: i32, buf: &mut [u8]) -> impl Future<Output = DSSResult
 
 pub(super) fn write_fd(fd: i32, buf: &[u8]) -> impl Future<Output = DSSResult<usize>> + '_ {
   std::future::poll_fn(move |cx| {
-    update_task_backtrace();
+    check_fd_nonblocking(fd);
     let rawfd = fd;
     let fd = unsafe { BorrowedFd::borrow_raw(fd) };
     match nix::unistd::write(fd, buf) {
@@ -132,7 +111,6 @@ where
   let task = Arc::new(Task {
     future: Mutex::new(Some(Box::pin(future))),
     sender: sender.clone(),
-    context: Mutex::new(std::backtrace::Backtrace::force_capture().to_string()),
   });
 
   sender.send(task).unwrap();
@@ -232,14 +210,10 @@ fn run_forever() {
         libc::alarm(5);
       }
 
-      set_current(task.clone());
-
       if future.as_mut().poll(context).is_pending() {
         // Not done, put it back
         *future_slot = Some(future);
       }
-
-      clear_current();
 
       unsafe {
         libc::alarm(0);
@@ -248,11 +222,7 @@ fn run_forever() {
       let elapsed = start.elapsed();
 
       if elapsed > std::time::Duration::from_millis(100) {
-        crate::error!(
-          "Task took too long: {:?}. Context: {}",
-          elapsed,
-          task.context.lock().unwrap()
-        );
+        crate::error!("Task took too long: {:?}", elapsed);
       }
     }
   }
