@@ -612,8 +612,8 @@ mod epoll {
   ) {
     while let Some((fd, polltype, waker)) = receiver.recv().await {
       let flags = match polltype {
-        PollType::Read => nix::sys::epoll::EpollFlags::EPOLLIN | nix::sys::epoll::EpollFlags::EPOLLONESHOT,
-        PollType::Write => nix::sys::epoll::EpollFlags::EPOLLOUT | nix::sys::epoll::EpollFlags::EPOLLONESHOT,
+        PollType::Read => EpollFlags::EPOLLIN | EpollFlags::EPOLLONESHOT,
+        PollType::Write => EpollFlags::EPOLLOUT | EpollFlags::EPOLLONESHOT,
       };
 
       let _ = waker_hashmap.lock().unwrap().insert(fd, waker);
