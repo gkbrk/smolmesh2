@@ -86,20 +86,24 @@ static SLEEP_REGISTER: LazyLock<std::sync::mpsc::Sender<(Instant, Box<Waker>)>> 
 });
 
 pub(super) fn read_fd(fd: i32, buf: &mut [u8]) -> impl Future<Output = DSSResult<usize>> + '_ {
-  std::future::poll_fn(move |cx| match nix::unistd::read(fd, buf) {
-    Ok(n) => Poll::Ready(Ok(n)),
-    Err(nix::errno::Errno::EAGAIN) => {
-      EPOLL_REGISTER
-        .send((fd, epoll::PollType::Read, cx.waker().clone()))
-        .unwrap();
-      Poll::Pending
+  std::future::poll_fn(move |cx| {
+    update_task_backtrace();
+    match nix::unistd::read(fd, buf) {
+      Ok(n) => Poll::Ready(Ok(n)),
+      Err(nix::errno::Errno::EAGAIN) => {
+        EPOLL_REGISTER
+          .send((fd, epoll::PollType::Read, cx.waker().clone()))
+          .unwrap();
+        Poll::Pending
+      }
+      Err(e) => Poll::Ready(Err(e.into())),
     }
-    Err(e) => Poll::Ready(Err(e.into())),
   })
 }
 
 pub(super) fn write_fd(fd: i32, buf: &[u8]) -> impl Future<Output = DSSResult<usize>> + '_ {
   std::future::poll_fn(move |cx| {
+    update_task_backtrace();
     let rawfd = fd;
     let fd = unsafe { BorrowedFd::borrow_raw(fd) };
     match nix::unistd::write(fd, buf) {
@@ -245,7 +249,7 @@ fn run_forever() {
 
       if elapsed > std::time::Duration::from_millis(100) {
         crate::error!(
-          "Task took too long: {:?}. Context: {:?}",
+          "Task took too long: {:?}. Context: {}",
           elapsed,
           task.context.lock().unwrap()
         );
@@ -567,7 +571,7 @@ mod epoll {
     Write,
   }
 
-  type WakerHashMap = HashMap<(i32, PollType), Waker>;
+  type WakerHashMap = HashMap<i32, Waker>;
 
   pub fn epoll_task() -> super::mpsc::Sender<(i32, PollType, Waker)> {
     let (sender, receiver) = super::mpsc::channel();
@@ -594,18 +598,8 @@ mod epoll {
 
       for event in events.iter().take(n) {
         let fd = event.data() as i32;
-        let event = event.events();
-
-        if event.contains(EpollFlags::EPOLLIN) {
-          if let Some(waker) = waker_hashmap.remove(&(fd, PollType::Read)) {
-            waker.wake();
-          }
-        }
-
-        if event.contains(EpollFlags::EPOLLOUT) {
-          if let Some(waker) = waker_hashmap.remove(&(fd, PollType::Write)) {
-            waker.wake();
-          }
+        if let Some(waker) = waker_hashmap.remove(&fd) {
+          waker.wake();
         }
       }
     }
@@ -622,7 +616,7 @@ mod epoll {
         PollType::Write => nix::sys::epoll::EpollFlags::EPOLLOUT | nix::sys::epoll::EpollFlags::EPOLLONESHOT,
       };
 
-      let _ = waker_hashmap.lock().unwrap().insert((fd, polltype), waker);
+      let _ = waker_hashmap.lock().unwrap().insert(fd, waker);
 
       let rawfd = fd;
       let fd = unsafe { BorrowedFd::borrow_raw(fd) };

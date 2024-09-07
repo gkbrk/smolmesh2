@@ -70,18 +70,20 @@ impl IpAddr {
     let b = b.to_le_bytes();
 
     IpAddr::V6(
-      b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-      a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]
+      b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7],
     )
   }
 }
 
-
 impl Display for IpAddr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-      match self {
-        IpAddr::V4(a, b, c, d) => write!(f, "{}.{}.{}.{}", a, b, c, d),
-        IpAddr::V6(a, b, c, d, e, g, h, i, j, k, l, m, n, o, p, q) => write!(f, "{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}", a, b, c, d, e, g, h, i, j, k, l, m, n, o, p, q)
-      }
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      IpAddr::V4(a, b, c, d) => write!(f, "{}.{}.{}.{}", a, b, c, d),
+      IpAddr::V6(a, b, c, d, e, g, h, i, j, k, l, m, n, o, p, q) => write!(
+        f,
+        "{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}",
+        a, b, c, d, e, g, h, i, j, k, l, m, n, o, p, q
+      ),
     }
+  }
 }

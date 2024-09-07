@@ -1,32 +1,37 @@
-use std::sync::Arc;
+use std::{
+  os::fd::{AsRawFd, FromRawFd, OwnedFd},
+  sync::Arc,
+};
 
-use crate::leo_async;
-
-struct OwnedFd {
-  fd: i32,
-}
-
-impl OwnedFd {
-  fn new(fd: i32) -> Self {
-    Self { fd }
-  }
-
-  fn fd(&self) -> i32 {
-    self.fd
-  }
-}
-
-impl Drop for OwnedFd {
-  fn drop(&mut self) {
-    crate::log!("Closing file descriptor {}", self.fd);
-    unsafe {
-      libc::close(self.fd);
-    }
-  }
-}
+use crate::leo_async::{self, DSSResult};
 
 pub(crate) struct TunInterface {
   fd: Arc<OwnedFd>,
+}
+
+fn dup(fd: &impl AsRawFd) -> DSSResult<impl AsRawFd> {
+  let fd = fd.as_raw_fd();
+  let res = unsafe { libc::dup(fd) };
+  match res {
+    -1 => Err("dup failed".into()),
+    fd => Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) }),
+  }
+}
+
+fn fd_make_nonblocking(fd: &impl AsRawFd) -> DSSResult<()> {
+  let fd = fd.as_raw_fd();
+  let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+  if flags == -1 {
+    return Err("fcntl failed".into());
+  }
+
+  let flags = flags | libc::O_NONBLOCK;
+  let res = unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+  if res == -1 {
+    return Err("fcntl failed".into());
+  }
+
+  Ok(())
 }
 
 unsafe fn nix_libc_open(path: &str) -> i32 {
@@ -68,7 +73,7 @@ impl TunInterface {
     }
 
     Self {
-      fd: Arc::new(OwnedFd::new(fd)),
+      fd: Arc::new(unsafe { OwnedFd::from_raw_fd(fd) }),
     }
   }
 
@@ -110,17 +115,20 @@ impl TunInterface {
   }
 
   pub(crate) fn run(&self) -> leo_async::mpsc::Sender<Vec<u8>> {
+    let read_fd = dup(&self.fd).unwrap();
+    let write_fd = dup(&self.fd).unwrap();
+
+    fd_make_nonblocking(&read_fd).unwrap();
+    fd_make_nonblocking(&write_fd).unwrap();
+
     // tun -> network
     {
-      let fd = self.fd.clone();
-
       leo_async::spawn(async move {
         leo_async::update_task_backtrace();
         let all_senders = crate::all_senders::get();
-        let fd = fd.clone();
         loop {
           let mut packet = vec![0; 2048];
-          let amount = match leo_async::read_fd(fd.fd(), &mut packet).await {
+          let amount = match leo_async::read_fd(read_fd.as_raw_fd(), &mut packet).await {
             Ok(0) => break,
             Ok(x) => x,
             Err(e) => {
@@ -157,13 +165,16 @@ impl TunInterface {
     let (sender, receiver) = leo_async::mpsc::channel::<Vec<u8>>();
 
     {
-      let fd = self.fd.clone();
       leo_async::spawn(async move {
         leo_async::update_task_backtrace();
         loop {
           if let Some(packet) = receiver.recv().await {
             unsafe {
-              libc::write(fd.fd(), packet.as_ptr() as *const libc::c_void, packet.len());
+              libc::write(
+                write_fd.as_raw_fd(),
+                packet.as_ptr() as *const libc::c_void,
+                packet.len(),
+              );
             }
           }
         }
