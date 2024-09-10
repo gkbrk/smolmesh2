@@ -249,37 +249,34 @@ pub(super) mod mpsc {
   use std::{
     collections::VecDeque,
     future::Future,
-    sync::{
-      atomic::{AtomicBool, AtomicUsize, Ordering},
-      Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
     task::{Poll, Waker},
   };
 
+  struct Inner<T> {
+    q: VecDeque<T>,
+    waker: Option<Waker>,
+    sender_count: usize,
+    receiver_there: bool,
+  }
+
   pub struct Receiver<T> {
-    q: Arc<Mutex<VecDeque<T>>>,
-    waker: Arc<Mutex<Option<Waker>>>,
-    sender_count: Arc<AtomicUsize>,
-    receiver_there: Arc<AtomicBool>,
+    inner: Arc<Mutex<Inner<T>>>,
   }
 
   pub struct Sender<T> {
-    q: Arc<Mutex<VecDeque<T>>>,
-    waker: Arc<Mutex<Option<Waker>>>,
-    sender_count: Arc<AtomicUsize>,
-    receiver_there: Arc<AtomicBool>,
+    inner: Arc<Mutex<Inner<T>>>,
   }
 
   impl<T> Sender<T> {
     pub fn send(&self, value: T) -> Result<(), ()> {
-      if self.receiver_there.load(Ordering::SeqCst) {
-        let mut q = self.q.lock().unwrap();
-        q.push_back(value);
+      let mut inner = self.inner.lock().unwrap();
 
-        if let Some(waker) = self.waker.lock().unwrap().take() {
+      if inner.receiver_there {
+        inner.q.push_back(value);
+        if let Some(waker) = inner.waker.take() {
           waker.wake();
         }
-
         Ok(())
       } else {
         Err(())
@@ -289,28 +286,29 @@ pub(super) mod mpsc {
 
   impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
-      let count = self.sender_count.fetch_sub(1, Ordering::SeqCst);
-      match count {
+      let mut inner = self.inner.lock().unwrap();
+
+      match inner.sender_count {
         0 => panic!("Dropped below zero"),
         1 => {
-          if let Some(waker) = self.waker.lock().unwrap().take() {
+          if let Some(waker) = inner.waker.take() {
             waker.wake();
           }
         }
         _ => {}
       }
+
+      inner.sender_count -= 1;
     }
   }
 
   impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
-      self.sender_count.fetch_add(1, Ordering::SeqCst);
+      let mut inner = self.inner.lock().unwrap();
+      inner.sender_count += 1;
 
       Sender {
-        q: self.q.clone(),
-        waker: self.waker.clone(),
-        sender_count: self.sender_count.clone(),
-        receiver_there: self.receiver_there.clone(),
+        inner: self.inner.clone(),
       }
     }
   }
@@ -318,12 +316,12 @@ pub(super) mod mpsc {
   impl<T> Receiver<T> {
     pub fn recv(&self) -> impl Future<Output = Option<T>> + '_ {
       std::future::poll_fn(|ctx| {
-        let mut q = self.q.lock().unwrap();
-        if let Some(value) = q.pop_front() {
+        let mut inner = self.inner.lock().unwrap();
+
+        if let Some(value) = inner.q.pop_front() {
           Poll::Ready(Some(value))
-        } else if self.sender_count.load(Ordering::SeqCst) > 0 {
-          let waker = ctx.waker().clone();
-          *self.waker.lock().unwrap() = Some(waker);
+        } else if inner.sender_count > 0 {
+          inner.waker = Some(ctx.waker().clone());
           Poll::Pending
         } else {
           Poll::Ready(None)
@@ -334,29 +332,21 @@ pub(super) mod mpsc {
 
   impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-      self.receiver_there.store(false, Ordering::SeqCst);
+      let mut inner = self.inner.lock().unwrap();
+      inner.receiver_there = false;
     }
   }
 
   pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
-    let q = Arc::new(Mutex::new(VecDeque::new()));
-    let waker = Arc::new(Mutex::new(None));
-    let sender_count = Arc::new(AtomicUsize::new(1));
-    let receiver_there = Arc::new(AtomicBool::new(true));
+    let inner = Arc::new(Mutex::new(Inner {
+      q: VecDeque::new(),
+      waker: None,
+      sender_count: 1,
+      receiver_there: true,
+    }));
 
-    let sender = Sender {
-      q: q.clone(),
-      waker: waker.clone(),
-      sender_count: sender_count.clone(),
-      receiver_there: receiver_there.clone(),
-    };
-
-    let receiver = Receiver {
-      q,
-      waker,
-      sender_count,
-      receiver_there,
-    };
+    let sender = Sender { inner: inner.clone() };
+    let receiver = Receiver { inner };
 
     (sender, receiver)
   }
