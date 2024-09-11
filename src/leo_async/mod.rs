@@ -12,6 +12,27 @@ use crossbeam::atomic::AtomicCell;
 
 use crate::{error, trace};
 
+fn noisytimer(s: impl ToString, milliseconds: u64) -> impl Drop {
+  struct X(String, std::time::Instant, std::time::Duration);
+
+  impl Drop for X {
+    fn drop(&mut self) {
+      let now = std::time::Instant::now();
+      let dur = now - self.1;
+
+      if dur > self.2 {
+        crate::warn!("NoisyTimer: {} took too long ({:?})", self.0, dur);
+      }
+    }
+  }
+
+  X(
+    s.to_string(),
+    std::time::Instant::now(),
+    std::time::Duration::from_millis(milliseconds),
+  )
+}
+
 pub(super) type DSSResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 struct Task {
@@ -66,6 +87,7 @@ fn check_fd_nonblocking(fd: i32) {
 
 pub(super) fn read_fd(fd: i32, buf: &mut [u8]) -> impl Future<Output = DSSResult<usize>> + '_ {
   std::future::poll_fn(move |cx| {
+    let _timer = noisytimer(format!("read_fd({}, {})", fd, buf.len()), 1);
     check_fd_nonblocking(fd);
     match nix::unistd::read(fd, buf) {
       Ok(n) => Poll::Ready(Ok(n)),
@@ -82,6 +104,7 @@ pub(super) fn read_fd(fd: i32, buf: &mut [u8]) -> impl Future<Output = DSSResult
 
 pub(super) fn write_fd(fd: i32, buf: &[u8]) -> impl Future<Output = DSSResult<usize>> + '_ {
   std::future::poll_fn(move |cx| {
+    let _timer = noisytimer(format!("write_fd({}, {})", fd, buf.len()), 1);
     check_fd_nonblocking(fd);
     let rawfd = fd;
     let fd = unsafe { BorrowedFd::borrow_raw(fd) };
@@ -166,6 +189,7 @@ where
     let result = result.clone();
     let waker = waker.clone();
     std::future::poll_fn(move |ctx| {
+      let _timer = noisytimer("fn_thread_future", 1);
       waker.store(Some(ctx.waker().clone()));
 
       match result.take() {
@@ -200,14 +224,13 @@ fn run_forever() {
     let mut future_slot = task.future.lock().unwrap();
 
     if let Some(mut future) = future_slot.take() {
+      let _timer = noisytimer("polling future", 1);
       let waker = std::task::Waker::from(task.clone());
       let context = &mut std::task::Context::from_waker(&waker);
 
-      let start = std::time::Instant::now();
-
       unsafe {
         // Polling something should not take more than 5 seconds, otherwise it's a bug
-        libc::alarm(5);
+        // libc::alarm(5);
       }
 
       if future.as_mut().poll(context).is_pending() {
@@ -216,13 +239,7 @@ fn run_forever() {
       }
 
       unsafe {
-        libc::alarm(0);
-      }
-
-      let elapsed = start.elapsed();
-
-      if elapsed > std::time::Duration::from_millis(100) {
-        crate::error!("Task took too long: {:?}", elapsed);
+        // libc::alarm(0);
       }
     }
   }
@@ -233,6 +250,7 @@ pub(super) fn sleep_seconds(seconds: impl Into<f64>) -> impl Future<Output = ()>
   let target = std::time::Instant::now() + std::time::Duration::from_secs_f64(seconds);
 
   std::future::poll_fn(move |cx| {
+    let _timer = noisytimer(format!("sleep_seconds({})", seconds), 1);
     let now = std::time::Instant::now();
 
     if now >= target {
@@ -270,6 +288,7 @@ pub(super) mod mpsc {
 
   impl<T> Sender<T> {
     pub fn send(&self, value: T) -> Result<(), ()> {
+      let _timer = super::noisytimer("mpsc::Sender::send", 1);
       let mut inner = self.inner.lock().unwrap();
 
       if inner.receiver_there {
@@ -316,6 +335,7 @@ pub(super) mod mpsc {
   impl<T> Receiver<T> {
     pub fn recv(&self) -> impl Future<Output = Option<T>> + '_ {
       std::future::poll_fn(|ctx| {
+        let _timer = super::noisytimer("mpsc::Receiver::recv", 1);
         let mut inner = self.inner.lock().unwrap();
 
         if let Some(value) = inner.q.pop_front() {
@@ -397,6 +417,7 @@ where
   type Output = DSSResult<T>;
 
   fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context) -> std::task::Poll<Self::Output> {
+    let _timer = noisytimer("TimeoutFuture::poll", 1);
     let now = std::time::Instant::now();
 
     if now >= self.timeout_at {
@@ -431,6 +452,7 @@ pub(super) fn select2_noresult<F1: Future, F2: Future>(f1: F1, f2: F2) -> impl F
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context) -> std::task::Poll<Self::Output> {
+      let _timer = noisytimer("select2_noresult::Select2Future::poll", 1);
       let this = self.get_mut();
 
       let f1 = Pin::new(&mut this.f1);
@@ -571,6 +593,7 @@ mod epoll {
     receiver: super::mpsc::Receiver<(i32, PollType, Waker)>,
   ) {
     while let Some((fd, polltype, waker)) = receiver.recv().await {
+      let _timer = super::noisytimer("epoll_register_task", 1);
       let flags = match polltype {
         PollType::Read => EpollFlags::EPOLLIN | EpollFlags::EPOLLONESHOT,
         PollType::Write => EpollFlags::EPOLLOUT | EpollFlags::EPOLLONESHOT,
