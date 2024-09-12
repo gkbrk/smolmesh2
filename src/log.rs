@@ -1,4 +1,4 @@
-pub(super) const TRACE_ENABLED: bool = true;
+pub(super) const TRACE_ENABLED: bool = false;
 pub(super) const DEBUG_ENABLED: bool = true;
 pub(super) const INFO_ENABLED: bool = true;
 pub(super) const WARN_ENABLED: bool = true;

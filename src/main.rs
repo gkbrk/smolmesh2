@@ -160,6 +160,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
 
   loop {
     let (data, _sender) = receiver.recv().await.unwrap();
+    leo_async::yield_now().await;
     // crate::log!("Got {:?}", data);
 
     // First 8 bytes are the milliseconds since epoch

@@ -37,6 +37,7 @@ impl KeystreamGen {
     }
   }
 
+  #[inline(always)]
   fn incr_ctr(&mut self) {
     self.ctr_low = self.ctr_low.wrapping_add(1);
     if self.ctr_low == 0 {
@@ -45,6 +46,7 @@ impl KeystreamGen {
     }
   }
 
+  #[inline(always)]
   fn iter_block(&mut self) {
     self.incr_ctr();
 
@@ -221,6 +223,7 @@ async fn connect_impl(
 
       loop {
         let data = sender_rx.recv().await.unwrap();
+        leo_async::yield_now().await;
 
         // Empty data means there is a cleaner checking the channel
         if data.is_empty() {
@@ -281,6 +284,7 @@ async fn connect_impl(
       let mut keystream = KeystreamGen::new(&recv_enc_key);
 
       loop {
+        leo_async::yield_now().await;
         // Read and decrypt length
         let mut len_buf = [0u8; 2];
         fd_readexact_timeout(read_sock.as_raw_fd(), &mut len_buf, 30_000).await?;
@@ -318,7 +322,7 @@ async fn connect_impl(
 
   leo_async::select2_noresult(send_task, recv_task).await;
 
-  crate::info!("Conenction finished");
+  crate::info!("Connection finished");
 
   Ok(())
 }
@@ -420,6 +424,7 @@ pub async fn handle_connection(
       let mut keystream = KeystreamGen::new(&send_enc_key);
 
       loop {
+        leo_async::yield_now().await;
         let packet = sender_rx.recv().await.unwrap();
         // Empty data means there is a cleaner checking the channel
         if packet.is_empty() {
@@ -453,6 +458,7 @@ pub async fn handle_connection(
       let mut keystream = KeystreamGen::new(&recv_enc_key);
 
       loop {
+        leo_async::yield_now().await;
         // Read and decrypt length
         let mut len_buf = [0u8; 2];
         fd_readexact_timeout(read_sock.as_raw_fd(), &mut len_buf, 30_000).await?;

@@ -135,6 +135,7 @@ impl TunInterface {
               continue;
             }
           };
+          leo_async::yield_now().await;
 
           unsafe {
             packet.set_len(amount as usize);
@@ -167,6 +168,7 @@ impl TunInterface {
       leo_async::spawn(async move {
         loop {
           if let Some(packet) = receiver.recv().await {
+            leo_async::yield_now().await;
             unsafe {
               libc::write(
                 write_fd.as_raw_fd(),
