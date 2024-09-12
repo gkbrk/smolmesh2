@@ -1,14 +1,11 @@
 use std::{
   future::Future,
-  num::NonZeroUsize,
   os::fd::BorrowedFd,
   pin::Pin,
-  sync::{Arc, LazyLock, Mutex, RwLock},
+  sync::{Arc, LazyLock, Mutex, OnceLock, RwLock},
   task::{Poll, Waker},
   time::Instant,
 };
-
-use crossbeam::atomic::AtomicCell;
 
 use crate::{error, trace};
 
@@ -37,7 +34,7 @@ pub(super) type DSSResult<T> = std::result::Result<T, Box<dyn std::error::Error 
 
 struct Task {
   future: Mutex<Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>>,
-  sender: crossbeam::channel::Sender<Arc<Task>>,
+  sender: std::sync::mpsc::Sender<Arc<Task>>,
 }
 
 impl std::task::Wake for Task {
@@ -51,18 +48,7 @@ impl std::task::Wake for Task {
   }
 }
 
-struct Executor {
-  task_receiver: crossbeam::channel::Receiver<Arc<Task>>,
-  task_sender: RwLock<Option<crossbeam::channel::Sender<Arc<Task>>>>,
-}
-
-static EXECUTOR: LazyLock<Executor> = LazyLock::new(|| {
-  let (task_sender, task_receiver) = crossbeam::channel::unbounded();
-  Executor {
-    task_receiver,
-    task_sender: RwLock::new(Some(task_sender)),
-  }
-});
+static TASK_SENDER: OnceLock<RwLock<Option<std::sync::mpsc::Sender<Arc<Task>>>>> = OnceLock::new();
 
 static EPOLL_REGISTER: LazyLock<mpsc::Sender<(i32, epoll::PollType, Waker)>> = LazyLock::new(epoll::epoll_task);
 
@@ -125,7 +111,7 @@ pub(super) fn spawn<F, T>(future: F)
 where
   F: Future<Output = T> + Send + 'static,
 {
-  let sender = EXECUTOR.task_sender.read().unwrap().clone().unwrap();
+  let sender = TASK_SENDER.get().unwrap().read().unwrap().as_ref().unwrap().clone();
 
   let future = async {
     _ = future.await;
@@ -144,6 +130,10 @@ where
   F: Future<Output = T> + Send + 'static,
   T: Send + 'static,
 {
+  let (task_sender, task_receiver) = std::sync::mpsc::channel();
+  TASK_SENDER.set(RwLock::new(Some(task_sender))).unwrap();
+  let t = std::thread::spawn(|| run_forever(task_receiver));
+
   let (result_sender, result_receiver) = std::sync::mpsc::channel();
 
   spawn(async move {
@@ -151,29 +141,9 @@ where
     result_sender.send(res).unwrap();
   });
 
-  let runners = {
-    let mut runners = Vec::new();
-
-    let parallelism = std::thread::available_parallelism()
-      .unwrap_or(NonZeroUsize::new(8).unwrap())
-      .get();
-    let parallelism = 1;
-
-    for _ in 0..parallelism {
-      let t = std::thread::spawn(run_forever);
-      runners.push(t);
-    }
-
-    runners
-  };
-
   let res = result_receiver.recv().unwrap();
-
-  EXECUTOR.task_sender.write().unwrap().take();
-
-  for r in runners {
-    r.join().unwrap();
-  }
+  TASK_SENDER.get().unwrap().write().unwrap().take();
+  t.join().unwrap();
 
   res
 }
@@ -182,17 +152,17 @@ pub(super) fn fn_thread_future<T>(f: impl FnOnce() -> T + Send + Sync + 'static)
 where
   T: Send + 'static,
 {
-  let result = Arc::new(AtomicCell::new(None));
-  let waker = Arc::new(AtomicCell::new(None));
+  let result = Arc::new(Mutex::new(None));
+  let waker = Arc::new(Mutex::new(None));
 
   let pollfn = {
     let result = result.clone();
     let waker = waker.clone();
     std::future::poll_fn(move |ctx| {
       let _timer = noisytimer("fn_thread_future", 1);
-      waker.store(Some(ctx.waker().clone()));
+      waker.lock().unwrap().replace(ctx.waker().clone());
 
-      match result.take() {
+      match result.lock().unwrap().take() {
         Some(res) => Poll::Ready(res),
         None => Poll::Pending,
       }
@@ -201,10 +171,10 @@ where
 
   std::thread::spawn(move || {
     let res = f();
-    result.store(Some(res));
+    result.lock().unwrap().replace(res);
 
     loop {
-      match waker.take() {
+      match waker.lock().unwrap().take() {
         Some(waker) => {
           waker.wake();
           break;
@@ -217,9 +187,7 @@ where
   pollfn
 }
 
-fn run_forever() {
-  let task_receiver = EXECUTOR.task_receiver.clone();
-
+fn run_forever(task_receiver: std::sync::mpsc::Receiver<Arc<Task>>) {
   for task in task_receiver {
     let mut future_slot = task.future.lock().unwrap();
 
