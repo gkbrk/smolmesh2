@@ -192,9 +192,8 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
           all_senders.add_fastest_to(ms, addr, _sender);
 
           // Add route to the node
-          match &route_adder {
-            Some(route_adder) => route_adder.send(addr).unwrap(),
-            None => {}
+          if let Some(route_adder) = &route_adder {
+            route_adder.send(addr).unwrap();
           }
         }
 
@@ -211,9 +210,8 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
         all_senders.send_all(orig_data.clone());
 
         // Add route to the node
-        match &route_adder {
-          Some(route_adder) => route_adder.send(addr).unwrap(),
-          None => {}
+        if let Some(route_adder) = &route_adder {
+          route_adder.send(addr).unwrap();
         }
       }
       2 => {
@@ -227,9 +225,8 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
         all_senders.send_all(orig_data.clone());
 
         // Add route to the node
-        match &route_adder {
-          Some(route_adder) => route_adder.send(addr).unwrap(),
-          None => {}
+        if let Some(route_adder) = &route_adder {
+          route_adder.send(addr).unwrap();
         }
       }
       3 => {
@@ -245,9 +242,8 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
         };
 
         if our_ips.contains(&target_addr) {
-          match &tun_sender {
-            Some(sender) => sender.send(data.to_vec()).unwrap(),
-            None => {}
+          if let Some(sender) = &tun_sender {
+            sender.send(data.to_vec()).unwrap();
           }
         } else {
           all_senders.send_to_fastest(target_addr, orig_data.to_vec());
