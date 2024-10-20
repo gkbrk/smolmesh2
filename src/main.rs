@@ -52,7 +52,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
   let node_ip = crate::ip_addr::IpAddr::from_node_name(&node_name);
   our_ips.insert(node_ip);
 
-  let mut seen_packets = seen_packets::SeenPackets::new(8128);
+  let mut seen_packets = seen_packets::SeenPackets::new(16_384);
 
   let (sender, receiver) = leo_async::mpsc::channel();
 
