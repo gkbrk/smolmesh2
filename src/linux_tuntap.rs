@@ -1,24 +1,12 @@
-use std::{
-  os::fd::{AsRawFd, FromRawFd, OwnedFd},
-  sync::Arc,
-};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
-use crate::leo_async::{self, DSSResult};
+use crate::leo_async::{self, ArcFd, DSSResult};
 
 pub(crate) struct TunInterface {
-  fd: Arc<OwnedFd>,
+  fd: ArcFd
 }
 
-fn dup(fd: &impl AsRawFd) -> DSSResult<impl AsRawFd> {
-  let fd = fd.as_raw_fd();
-  let res = unsafe { libc::dup(fd) };
-  match res {
-    -1 => Err("dup failed".into()),
-    fd => Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) }),
-  }
-}
-
-fn fd_make_nonblocking(fd: &impl AsRawFd) -> DSSResult<()> {
+fn fd_make_nonblocking(fd: &ArcFd) -> DSSResult<()> {
   let fd = fd.as_raw_fd();
   let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
   if flags == -1 {
@@ -73,7 +61,7 @@ impl TunInterface {
     }
 
     Self {
-      fd: Arc::new(unsafe { OwnedFd::from_raw_fd(fd) }),
+      fd: ArcFd::from_owned_fd(unsafe { OwnedFd::from_raw_fd(fd) })
     }
   }
 
@@ -115,8 +103,8 @@ impl TunInterface {
   }
 
   pub(crate) fn run(&self) -> leo_async::mpsc::Sender<Vec<u8>> {
-    let read_fd = dup(&self.fd).unwrap();
-    let write_fd = dup(&self.fd).unwrap();
+    let read_fd = self.fd.dup().unwrap();
+    let write_fd = self.fd.dup().unwrap();
 
     fd_make_nonblocking(&read_fd).unwrap();
     fd_make_nonblocking(&write_fd).unwrap();
@@ -127,7 +115,7 @@ impl TunInterface {
         let all_senders = crate::all_senders::get();
         loop {
           let mut packet = vec![0; 2048];
-          let amount = match leo_async::read_fd(read_fd.as_raw_fd(), &mut packet).await {
+          let amount = match leo_async::read_fd(&read_fd, &mut packet).await {
             Ok(0) => break,
             Ok(x) => x,
             Err(e) => {
