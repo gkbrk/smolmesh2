@@ -12,7 +12,7 @@ codegen-units = 1
 json = "0.12.4"
 lazy_static = "1.5.0"
 chrono = "0.4.38"
-libc = "0.2.158"
+libc = "0.2.161"
 libloading = "0.8.5"
 
 [dependencies.nix]
