@@ -508,6 +508,7 @@ pub fn listener(
   keys: Vec<Vec<u8>>,
   incoming: leo_async::mpsc::Sender<(Vec<u8>, leo_async::mpsc::Sender<Vec<u8>>)>,
 ) {
+  // TODO: Use async stuff instead of spawning threads
   std::thread::spawn(move || loop {
     let incoming = incoming.clone();
     let keys = keys.clone();

@@ -24,6 +24,7 @@ mod windows_tuntap;
 #[cfg(windows)]
 mod wintun;
 
+#[inline(always)]
 fn millis() -> u64 {
   let now = std::time::SystemTime::now();
   let since_epoch = now.duration_since(std::time::UNIX_EPOCH).unwrap();
