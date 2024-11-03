@@ -4,17 +4,21 @@ Smolmesh2 is a mesh networking tool written in Rust that allows nodes to communi
 
 ## Features
 
-- **IPv4 and IPv6 Support:** Handles both IPv4 and IPv6 addresses.
-- **Multiple Transports:** Supports legacy TCP connections, both for connecting and listening.
-- **TUN/TAP Interface:** Integrates with TUN/TAP interfaces on both Linux and Windows to manage network traffic.
-- **Packet Routing and Broadcasting:** Efficiently routes packets to their destinations and broadcasts node availability.
+- **IPv4 and IPv6 Support:** Handles both IPv4 and IPv6 addresses with automatic route management
+- **Multiple Transports:** Supports legacy TCP connections, both for connecting and listening using encrypted channels
+- **TUN/TAP Interface:** Integrates with TUN/TAP interfaces on Linux and Wintun on Windows to manage network traffic
+- **Packet Routing and Broadcasting:** Efficiently routes packets to their destinations using fastest path discovery and broadcasts node availability
+- **Automatic Path Discovery:** Discovers and maintains optimal paths between nodes
+- **Encrypted Communications:** All communications are encrypted using the SPECK cipher
+- **Duplicate Packet Detection:** Prevents packet loops using efficient packet tracking
 
 ## Commands
 
-- **meshnode:** Runs the mesh node with the specified configuration.
-- **name-to-ipv6:** Converts a node name to its corresponding IPv6 address.
-- **make-random-ipv4:** Generates a random IPv4 address.
-- **make-random-ipv6:** Generates a random IPv6 address.
+- **help, --help:** Show help message with available commands
+- **meshnode [config-file]:** Runs the mesh node with the specified configuration file
+- **name-to-ipv6 [node-name]:** Converts a node name to its corresponding IPv6 address
+- **make-random-ipv4:** Generates a random IPv4 address
+- **make-random-ipv6:** Generates a random IPv6 address with fd00::/8 prefix
 
 ## Usage
 
@@ -37,18 +41,25 @@ The configuration file (`config.json`) should include details such as node name,
       "type": "legacy_tcp_connect",
       "host": "example.com",
       "port": 12345,
-      "key": "your_key_here"
+      "key": "encryption_key_here"
     },
     {
       "type": "legacy_tcp_listen",
       "port": 54321,
-      "keys": ["key1", "key2"]
+      "keys": ["allowed_key1", "allowed_key2"]
     }
   ],
   "linux_tuntap": true,
   "windows_tuntap": false
 }
 ```
+
+Note that on Windows, the Wintun driver (wintun-amd64.dll) must be present in the working directory for TUN/TAP functionality.
+
+## Dependencies
+
+- Linux: TUN/TAP kernel support
+- Windows: Wintun driver
 
 ## Contributing
 
