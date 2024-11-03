@@ -148,16 +148,7 @@ async fn connect_timeout(addr: &std::net::SocketAddr, timeout: std::time::Durati
   let sock = leo_async::socket::socket()?;
   fd_make_nonblocking(&sock)?;
 
-  let conn_res = {
-    let sock = sock.clone();
-    async move {
-      leo_async::socket::connect(sock.clone(), addr).await?;
-      DSSResult::Ok(())
-    }
-  };
-
-  let conn_res = std::pin::pin!(conn_res);
-
+  let conn_res = leo_async::socket::connect(&sock, addr);
   leo_async::timeout_future(conn_res, timeout).await??;
 
   fd_make_nonblocking(&sock)?;

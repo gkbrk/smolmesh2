@@ -286,7 +286,10 @@ pub(super) mod socket {
     }
   }
 
-  pub fn connect(sock: ArcFd, addr: &std::net::SocketAddr) -> impl std::future::Future<Output = DSSResult<()>> {
+  pub fn connect<'a>(
+    sock: &'a ArcFd,
+    addr: &std::net::SocketAddr,
+  ) -> impl std::future::Future<Output = DSSResult<()>> + 'a {
     let addr = match addr {
       std::net::SocketAddr::V4(addr) => addr,
       _ => unimplemented!(),
@@ -331,7 +334,15 @@ pub(super) mod socket {
     let fd = fd.as_raw_fd();
     let flag = 1;
 
-    let res = unsafe { libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, &flag as *const _ as *const _, 4) };
+    let res = unsafe {
+      libc::setsockopt(
+        fd,
+        libc::IPPROTO_TCP,
+        libc::TCP_NODELAY,
+        &flag as *const _ as *const _,
+        4,
+      )
+    };
 
     match res {
       0 => Ok(()),
