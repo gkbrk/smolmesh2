@@ -1,6 +1,8 @@
 # Smolmesh2
 
-Smolmesh2 is a mesh networking tool written in Rust that allows nodes to communicate over various transports while maintaining a decentralized and resilient network structure. It supports Linux and Windows operating systems and includes several key features to facilitate seamless communication and network stability.
+Welcome to Smolmesh2! 🌐
+
+Smolmesh2 is a powerful mesh networking tool written in Rust that allows nodes to communicate over various transports while maintaining a decentralized and resilient network structure. It supports Linux and Windows operating systems and includes several key features to facilitate seamless communication and network stability.
 
 ## Features
 
@@ -23,10 +25,10 @@ Smolmesh2 is a mesh networking tool written in Rust that allows nodes to communi
 ## Usage
 
 To start a mesh node, run:
-```
+```bash
 cargo run -- meshnode config.json
 ```
-This will initialize the node using the configuration specified in `config.json`.
+This will initialize the node using the configuration specified in `config.json`. See the [Configuration](#configuration) section below for details.
 
 ## Configuration
 
@@ -54,7 +56,7 @@ The configuration file (`config.json`) should include details such as node name,
 }
 ```
 
-Note that on Windows, the Wintun driver (wintun-amd64.dll) must be present in the working directory for TUN/TAP functionality.
+Note that on Windows, the Wintun driver (wintun-amd64.dll) must be present in the working directory for TUN/TAP functionality. See the [Dependencies](#dependencies) section for more details.
 
 ## Dependencies
 
