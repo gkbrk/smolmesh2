@@ -5,15 +5,15 @@ edition = "2021"
 
 [profile.release]
 opt-level = 3
-lto = true
+lto = "fat"
 codegen-units = 1
 
 [dependencies]
 json = "0.12.4"
 lazy_static = "1.5.0"
-chrono = "0.4.38"
-libc = "0.2.161"
-libloading = "0.8.5"
+chrono = "0.4.39"
+libc = "0.2.169"
+libloading = "0.8.6"
 
 [dependencies.nix]
 version = "0.29.0"
