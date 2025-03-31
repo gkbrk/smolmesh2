@@ -26,19 +26,19 @@ impl IpAddr {
     let c = buf[2];
     let d = buf[3];
     let e = buf[4];
-    let g = buf[5];
-    let h = buf[6];
-    let i = buf[7];
-    let j = buf[8];
-    let k = buf[9];
-    let l = buf[10];
-    let m = buf[11];
-    let n = buf[12];
-    let o = buf[13];
-    let p = buf[14];
-    let q = buf[15];
+    let f = buf[5];
+    let g = buf[6];
+    let h = buf[7];
+    let i = buf[8];
+    let j = buf[9];
+    let k = buf[10];
+    let l = buf[11];
+    let m = buf[12];
+    let n = buf[13];
+    let o = buf[14];
+    let p = buf[15];
 
-    IpAddr::V6(a, b, c, d, e, g, h, i, j, k, l, m, n, o, p, q)
+    IpAddr::V6(a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p)
   }
 
   pub(crate) fn from_node_name(name: &str) -> Self {
@@ -79,10 +79,10 @@ impl Display for IpAddr {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match self {
       IpAddr::V4(a, b, c, d) => write!(f, "{}.{}.{}.{}", a, b, c, d),
-      IpAddr::V6(a, b, c, d, e, g, h, i, j, k, l, m, n, o, p, q) => write!(
+      IpAddr::V6(a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p) => write!(
         f,
         "{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}",
-        a, b, c, d, e, g, h, i, j, k, l, m, n, o, p, q
+        a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p
       ),
     }
   }
