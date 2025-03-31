@@ -11,8 +11,10 @@ Smolmesh2 is a powerful mesh networking tool written in Rust that allows nodes t
 - **TUN/TAP Interface:** Integrates with TUN/TAP interfaces on Linux and Wintun on Windows to manage network traffic
 - **Packet Routing and Broadcasting:** Efficiently routes packets to their destinations using fastest path discovery and broadcasts node availability
 - **Automatic Path Discovery:** Discovers and maintains optimal paths between nodes
-- **Encrypted Communications:** All communications are encrypted using the SPECK cipher
-- **Duplicate Packet Detection:** Prevents packet loops using efficient packet tracking
+- **Encrypted Communications:** All communications are encrypted using the SPECK cipher for lightweight but effective security
+- **Duplicate Packet Detection:** Prevents packet loops using efficient packet tracking with hash-based detection
+- **Asynchronous Architecture:** Custom async runtime (leo_async) for efficient I/O operations
+- **Cross-Platform Support:** Works on both Linux and Windows with platform-specific networking implementations
 
 ## Commands
 
@@ -56,15 +58,43 @@ The configuration file (`config.json`) should include details such as node name,
 }
 ```
 
-Note that on Windows, the Wintun driver (wintun-amd64.dll) must be present in the working directory for TUN/TAP functionality. See the [Dependencies](#dependencies) section for more details.
+## Platform-Specific Features
+
+### Linux
+- Uses native TUN/TAP interfaces for virtual network adapters
+- Automatically configures IP routes and interface settings
+- Requires TUN/TAP kernel support
+
+### Windows
+- Uses Wintun driver for virtual network adapter functionality
+- Automatically configures IPv6 addresses for the virtual adapter
+- Requires the Wintun driver (wintun-amd64.dll) in the working directory
+
+## Technical Details
+
+### Network Protocol
+- Uses a custom packet format with timestamp, command type, and payload
+- Supports node discovery, IP address broadcasting, and data transfer
+- Implements duplicate packet detection to prevent loops
+
+### Security
+- All transport connections are encrypted using the SPECK cipher
+- Uses challenge-response authentication for connection establishment
+- Implements MAC (Message Authentication Code) for packet integrity
+
+### Networking
+- Custom async networking stack for efficient I/O operations
+- Supports non-blocking socket operations
+- Implements timeout handling for network operations
 
 ## Dependencies
 
 - Linux: TUN/TAP kernel support
-- Windows: Wintun driver
+- Windows: Wintun driver (wintun-amd64.dll)
+- Rust standard library and a few external crates
 
 ## Contributing
 
 Contributions are welcome! Please open an issue or submit a pull request on GitHub. For major changes, please discuss them in an issue first to ensure they align with the project's goals.
 
-Enjoy using SmolMesh2 to build decentralized and resilient networks!
+Enjoy using Smolmesh2 to build decentralized and resilient networks!
