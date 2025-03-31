@@ -103,6 +103,29 @@ pub fn uniform() -> f64 {
   RNG.lock().unwrap().uniform()
 }
 
+fn read_from_urandom<T: Write>(rng: &mut T) {
+  use std::fs::File;
+  use std::io::Read;
+
+  match File::open("/dev/urandom") {
+    Ok(mut f) => {
+      writeln!(rng, "Opened!").unwrap();
+      let mut buf = [0; 64];
+      match f.read(&mut buf) {
+        Ok(_) => {
+          writeln!(rng, "urandom buffer: {:?}", buf).unwrap();
+        }
+        Err(e) => {
+          writeln!(rng, "Failed to read from /dev/urandom: {:?}", e).unwrap();
+        }
+      }
+    }
+    Err(e) => {
+      writeln!(rng, "Failed to open /dev/urandom: {:?}", e).unwrap();
+    }
+  }
+}
+
 pub fn init_rng() {
   let mut rng = RNG.lock().unwrap();
 
@@ -150,6 +173,9 @@ pub fn init_rng() {
   // Timestamps
   writeln!(rng, "{:?}", std::time::SystemTime::now()).unwrap();
   writeln!(rng, "{:?}", std::time::Instant::now()).unwrap();
+
+  // Attempt to read from /dev/urandom
+  read_from_urandom(&mut *rng);
 
   // Mix a bit
   for i in 0..64 {
