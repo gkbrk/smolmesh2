@@ -79,10 +79,10 @@ impl Display for IpAddr {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match self {
       IpAddr::V4(a, b, c, d) => write!(f, "{}.{}.{}.{}", a, b, c, d),
-      IpAddr::V6(a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p) => write!(
+      IpAddr::V6(a, b, c, d, e, _f, g, h, i, j, k, l, m, n, o, p) => write!(
         f,
         "{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}",
-        a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p
+        a, b, c, d, e, _f, g, h, i, j, k, l, m, n, o, p
       ),
     }
   }
