@@ -166,6 +166,11 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
   loop {
     let (data, _sender) = receiver.recv().await.unwrap();
     leo_async::yield_now().await;
+    // drop too-short packets before parsing headers
+    if data.len() < 9 {
+      warn!("Dropping too-short packet ({} bytes)", data.len());
+      continue;
+    }
     // crate::log!("Got {:?}", data);
 
     // First 8 bytes are the milliseconds since epoch
