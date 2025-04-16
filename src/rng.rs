@@ -110,9 +110,10 @@ fn read_from_urandom<T: Write>(rng: &mut T) {
   match File::open("/dev/urandom") {
     Ok(mut f) => {
       writeln!(rng, "Opened!").unwrap();
-      let mut buf = [0; 64];
-      match f.read(&mut buf) {
-        Ok(_) => {
+      let mut buf = [0u8; 64];
+      // Read exactly 64 bytes from /dev/urandom, treating short reads as errors
+      match f.read_exact(&mut buf) {
+        Ok(()) => {
           writeln!(rng, "urandom buffer: {:?}", buf).unwrap();
         }
         Err(e) => {
