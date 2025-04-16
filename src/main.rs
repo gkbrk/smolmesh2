@@ -32,9 +32,13 @@ fn millis() -> u64 {
 }
 
 async fn run_meshnode(args: &mut VecDeque<String>) {
-  let config_path = args.pop_front().unwrap();
-  let config_file = std::fs::read_to_string(config_path).unwrap();
-  let config = json::parse(&config_file).unwrap();
+  let config_path = args
+    .pop_front()
+    .expect("meshnode requires a <config-file> argument");
+  let config_file = std::fs::read_to_string(&config_path)
+    .unwrap_or_else(|e| panic!("failed to read {}: {}", config_path, e));
+  let config = json::parse(&config_file)
+    .unwrap_or_else(|e| panic!("failed to parse JSON in {}: {}", config_path, e));
   let all_senders = all_senders::get();
 
   let mut our_ips = HashSet::new();
