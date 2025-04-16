@@ -270,15 +270,14 @@ async fn async_main() -> DSSResult<()> {
 
   let mut args: VecDeque<String> = std::env::args().collect();
 
-  // Ignore executable
+  // Strip off executable name
   let executable = args.pop_front().expect("Executable name should always be there");
-
+  // If no subcommand, default to 'help'
   if args.is_empty() {
-    args.push_back("meshnode".to_owned());
-    args.push_back("config.json".to_owned());
+    args.push_back("help".to_owned());
   }
-
-  match args.pop_front().unwrap().as_str() {
+  let cmd = args.pop_front().unwrap();
+  match cmd.as_str() {
     "help" | "--help" => {
       println!("smolmesh2 - peer-to-peer mesh VPN");
       println!();
