@@ -165,6 +165,34 @@ pub(super) fn fd_writable(fd: &ArcFd) -> DSSResult<bool> {
   Ok(fds[0].revents().ok_or(":(")?.contains(nix::poll::PollFlags::POLLOUT))
 }
 
+pub(super) fn fd_wait_readable(fd: &ArcFd) -> impl Future<Output = DSSResult<()>> + '_ {
+  std::future::poll_fn(move |cx| {
+    if fd_readable(fd)? {
+      return Poll::Ready(Ok(()));
+    }
+
+    EPOLL_REGISTER
+      .send((fd.clone(), epoll::PollType::Read, cx.waker().clone()))
+      .unwrap();
+
+    Poll::Pending
+  })
+}
+
+pub(super) fn fd_wait_writable(fd: &ArcFd) -> impl Future<Output = DSSResult<()>> + '_ {
+  std::future::poll_fn(move |cx| {
+    if fd_writable(fd)? {
+      return Poll::Ready(Ok(()));
+    }
+
+    EPOLL_REGISTER
+      .send((fd.clone(), epoll::PollType::Write, cx.waker().clone()))
+      .unwrap();
+
+    Poll::Pending
+  })
+}
+
 pub(super) fn spawn<F, T>(future: F)
 where
   F: Future<Output = T> + Send + 'static,
@@ -299,7 +327,7 @@ fn get_errno() -> i32 {
 pub(super) mod socket {
   use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
-  use super::{get_errno, ArcFd, DSSResult};
+  use super::{ArcFd, DSSResult, get_errno};
 
   pub fn socket() -> DSSResult<ArcFd> {
     let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
