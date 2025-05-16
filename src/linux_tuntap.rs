@@ -22,7 +22,7 @@ fn fd_make_nonblocking(fd: &ArcFd) -> DSSResult<()> {
   Ok(())
 }
 
-unsafe fn nix_libc_open(path: &str) -> i32 {
+fn nix_libc_open(path: &str) -> i32 {
   // Copy to null-terminated string
   let mut path = path.to_owned();
   path.push('\0');
@@ -33,7 +33,7 @@ unsafe fn nix_libc_open(path: &str) -> i32 {
   #[cfg(target_arch = "aarch64")]
   let path = path.as_ptr() as *const u8;
 
-  libc::open(path, libc::O_RDWR | libc::O_NONBLOCK)
+  unsafe { libc::open(path, libc::O_RDWR | libc::O_NONBLOCK) }
 }
 
 impl TunInterface {
