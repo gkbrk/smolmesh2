@@ -1,7 +1,7 @@
 use std::{
   collections::HashMap,
   future::Future,
-  os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
+  os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
   pin::Pin,
   sync::{Arc, LazyLock, Mutex, OnceLock, RwLock},
   task::{Poll, Waker},
@@ -63,6 +63,12 @@ impl Eq for ArcFd {}
 impl std::hash::Hash for ArcFd {
   fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
     self.as_raw_fd().hash(state);
+  }
+}
+
+impl AsFd for ArcFd {
+  fn as_fd(&self) -> BorrowedFd<'_> {
+    unsafe { BorrowedFd::borrow_raw(self.as_raw_fd()) }
   }
 }
 
@@ -139,6 +145,15 @@ pub(super) fn write_fd<'a>(fd: &'a ArcFd, buf: &'a [u8]) -> impl Future<Output =
       Err(e) => Poll::Ready(Err(e.into())),
     }
   })
+}
+
+pub(super) fn fd_readable(fd: &ArcFd) -> DSSResult<bool> {
+  let mut fds = [nix::poll::PollFd::new(fd.as_fd(), nix::poll::PollFlags::POLLIN)];
+  {
+    nix::poll::poll(&mut fds, nix::poll::PollTimeout::ZERO)?;
+  }
+
+  Ok(fds[0].revents().ok_or(":(")?.contains(nix::poll::PollFlags::POLLIN))
 }
 
 pub(super) fn spawn<F, T>(future: F)
