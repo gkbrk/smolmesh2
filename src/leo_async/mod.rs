@@ -156,6 +156,15 @@ pub(super) fn fd_readable(fd: &ArcFd) -> DSSResult<bool> {
   Ok(fds[0].revents().ok_or(":(")?.contains(nix::poll::PollFlags::POLLIN))
 }
 
+pub(super) fn fd_writable(fd: &ArcFd) -> DSSResult<bool> {
+  let mut fds = [nix::poll::PollFd::new(fd.as_fd(), nix::poll::PollFlags::POLLOUT)];
+  {
+    nix::poll::poll(&mut fds, nix::poll::PollTimeout::ZERO)?;
+  }
+
+  Ok(fds[0].revents().ok_or(":(")?.contains(nix::poll::PollFlags::POLLOUT))
+}
+
 pub(super) fn spawn<F, T>(future: F)
 where
   F: Future<Output = T> + Send + 'static,
