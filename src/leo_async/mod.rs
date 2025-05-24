@@ -42,12 +42,18 @@ impl ArcFd {
     ArcFd { fd: Arc::new(fd) }
   }
 
+  pub(crate) fn from_raw_fd(fd: RawFd) -> Self {
+    Self {
+      fd: Arc::new(unsafe { OwnedFd::from_raw_fd(fd) }),
+    }
+  }
+
   pub(crate) fn dup(&self) -> DSSResult<Self> {
     let fd = self.as_raw_fd();
     let res = unsafe { libc::dup(fd) };
     match res {
       -1 => Err("dup failed".into()),
-      fd => Ok(ArcFd::from_owned_fd(unsafe { OwnedFd::from_raw_fd(fd) })),
+      fd => Ok(Self::from_raw_fd(fd)),
     }
   }
 }

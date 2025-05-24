@@ -1,10 +1,8 @@
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::sync::Arc;
 
 use crate::leo_async::{self, ArcFd};
-use crate::{all_senders, log};
-
-type DResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-type DSSResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+use crate::{DSSResult, all_senders, info, log};
 
 struct KeystreamGen {
   round_keys: [u64; 32],
@@ -336,18 +334,10 @@ pub fn create_connection(
 
 pub async fn handle_connection(
   keys: Vec<Vec<u8>>,
-  conn: std::net::TcpStream,
+  conn: ArcFd,
   incoming: leo_async::mpsc::Sender<(Vec<u8>, leo_async::mpsc::Sender<Vec<u8>>)>,
 ) -> DSSResult<()> {
   let all_senders = all_senders::get();
-
-  let conn = {
-    let owned_fd = unsafe { OwnedFd::from_raw_fd(conn.as_raw_fd()) };
-    std::mem::forget(conn);
-    ArcFd::from_owned_fd(owned_fd)
-  };
-
-  fd_make_nonblocking(&conn)?;
   leo_async::socket::set_nodelay(&conn)?;
 
   let read_sock = conn.dup()?;
@@ -486,24 +476,38 @@ pub async fn handle_connection(
   Ok(())
 }
 
-pub fn listener_impl(
+pub async fn listener_impl(
   port: u16,
   keys: Vec<Vec<u8>>,
   incoming: leo_async::mpsc::Sender<(Vec<u8>, leo_async::mpsc::Sender<Vec<u8>>)>,
-) -> DResult<()> {
-  let listener = std::net::TcpListener::bind(("0.0.0.0", port))?;
+) -> DSSResult<()> {
+  let socket = leo_async::socket::socket()?;
+  fd_make_nonblocking(&socket)?;
 
-  for x in listener.incoming() {
-    let keys = keys.clone();
-    let incoming = incoming.clone();
-    let x = x?;
+  nix::sys::socket::setsockopt(&socket, nix::sys::socket::sockopt::ReuseAddr, &true)?;
 
-    crate::log!("Incoming connection: {:?}", x);
+  let bind_addr = nix::sys::socket::SockaddrIn::new(0, 0, 0, 0, port);
+  nix::sys::socket::bind(socket.as_raw_fd(), &bind_addr)?;
+  nix::sys::socket::listen(&socket, nix::sys::socket::Backlog::new(128)?)?;
 
-    leo_async::spawn(handle_connection(keys, x, incoming));
+  loop {
+    if let Err(e) = leo_async::fd_wait_readable(&socket).await {
+      crate::error!("fd_wait_readable error: {}", e);
+      continue;
+    }
+
+    match nix::sys::socket::accept(socket.as_raw_fd()) {
+      Ok(fd) => {
+        let fd = ArcFd::from_raw_fd(fd);
+        fd_make_nonblocking(&fd)?;
+        leo_async::spawn(handle_connection(keys.clone(), fd, incoming.clone()));
+      }
+      Err(e) => {
+        crate::error!("accept failed: {}", e);
+        continue;
+      }
+    }
   }
-
-  Ok(())
 }
 
 pub fn listener(
@@ -511,19 +515,16 @@ pub fn listener(
   keys: Vec<Vec<u8>>,
   incoming: leo_async::mpsc::Sender<(Vec<u8>, leo_async::mpsc::Sender<Vec<u8>>)>,
 ) {
-  // TODO: Use async stuff instead of spawning threads
-  std::thread::spawn(move || {
+  leo_async::spawn(async move {
     loop {
       let incoming = incoming.clone();
       let keys = keys.clone();
 
-      let res = listener_impl(port, keys, incoming.clone());
-
-      println!("{:?}", res);
+      let res = listener_impl(port, keys, incoming.clone()).await;
+      info!("Listener impl result: {:?}", res);
 
       let delay = 5.0 + crate::rng::uniform() * 5.0;
-
-      std::thread::sleep(std::time::Duration::from_secs_f64(delay));
+      leo_async::sleep_seconds(delay).await;
     }
   });
 }
