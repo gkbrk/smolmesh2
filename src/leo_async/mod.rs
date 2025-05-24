@@ -325,7 +325,7 @@ fn get_errno() -> i32 {
 pub(super) mod socket {
   use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
-  use super::{ArcFd, DSSResult, get_errno};
+  use super::{fd_wait_readable, fd_wait_writable, get_errno, ArcFd, DSSResult};
 
   pub fn socket() -> DSSResult<ArcFd> {
     let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
@@ -336,13 +336,13 @@ pub(super) mod socket {
     }
   }
 
-  pub fn connect<'a>(
+  pub async fn connect<'a>(
     sock: &'a ArcFd,
     addr: &std::net::SocketAddr,
-  ) -> impl std::future::Future<Output = DSSResult<()>> + 'a {
+  ) -> DSSResult<()> {
     let addr = match addr {
       std::net::SocketAddr::V4(addr) => addr,
-      _ => unimplemented!(),
+      _ => unimplemented!("Cannot connect to IPv6 addresses"),
     };
 
     let sockaddr = libc::sockaddr_in {
@@ -354,30 +354,26 @@ pub(super) mod socket {
       sin_zero: [0; 8],
     };
 
-    std::future::poll_fn(move |ctx| {
-      let res = unsafe {
-        libc::connect(
-          sock.as_raw_fd(),
-          &sockaddr as *const _ as *const _,
-          std::mem::size_of_val(&sockaddr) as u32,
-        )
-      };
+    let conn_res = unsafe {
+      libc::connect(
+        sock.as_raw_fd(),
+        &sockaddr as *const _ as *const libc::sockaddr,
+        std::mem::size_of_val(&sockaddr) as u32,
+      )
+    };
 
-      match res {
-        0 => std::task::Poll::Ready(DSSResult::Ok(())),
-        -1 => match get_errno() {
-          libc::EINPROGRESS | libc::EALREADY => {
-            super::EPOLL_REGISTER
-              .send((sock.as_raw_fd(), super::epoll::PollType::Write, ctx.waker().clone()))
-              .unwrap();
-            std::task::Poll::Pending
-          }
-          libc::EISCONN => std::task::Poll::Ready(DSSResult::Ok(())),
-          _ => std::task::Poll::Ready(DSSResult::Err("connect failed".into())),
-        },
-        _ => unreachable!(),
-      }
-    })
+    match conn_res {
+      0 => Ok(()),
+      -1 => match get_errno() {
+        libc::EINPROGRESS | libc::EALREADY => {
+          fd_wait_writable(sock).await?;
+          Ok(())
+        }
+        libc::EISCONN => Ok(()),
+        _ => Err(format!("connect failed: {}", get_errno()).into()),
+      },
+      _ => unreachable!(),
+    }
   }
 
   pub fn set_nodelay(fd: &ArcFd) -> DSSResult<()> {

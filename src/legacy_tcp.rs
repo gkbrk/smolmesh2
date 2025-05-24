@@ -148,8 +148,11 @@ async fn connect_timeout(addr: &std::net::SocketAddr, timeout: std::time::Durati
   let sock = leo_async::socket::socket()?;
   fd_make_nonblocking(&sock)?;
 
-  let conn_res = leo_async::socket::connect(&sock, addr);
-  leo_async::timeout_future(conn_res, timeout).await??;
+  {
+    let conn_res = leo_async::socket::connect(&sock, addr);
+    let conn_res = std::pin::pin!(conn_res);
+    leo_async::timeout_future(conn_res, timeout).await??;
+  }
 
   fd_make_nonblocking(&sock)?;
 
@@ -509,16 +512,18 @@ pub fn listener(
   incoming: leo_async::mpsc::Sender<(Vec<u8>, leo_async::mpsc::Sender<Vec<u8>>)>,
 ) {
   // TODO: Use async stuff instead of spawning threads
-  std::thread::spawn(move || loop {
-    let incoming = incoming.clone();
-    let keys = keys.clone();
+  std::thread::spawn(move || {
+    loop {
+      let incoming = incoming.clone();
+      let keys = keys.clone();
 
-    let res = listener_impl(port, keys, incoming.clone());
+      let res = listener_impl(port, keys, incoming.clone());
 
-    println!("{:?}", res);
+      println!("{:?}", res);
 
-    let delay = 5.0 + crate::rng::uniform() * 5.0;
+      let delay = 5.0 + crate::rng::uniform() * 5.0;
 
-    std::thread::sleep(std::time::Duration::from_secs_f64(delay));
+      std::thread::sleep(std::time::Duration::from_secs_f64(delay));
+    }
   });
 }
