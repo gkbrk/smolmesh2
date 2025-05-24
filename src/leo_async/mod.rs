@@ -106,7 +106,7 @@ static TASK_SENDER: OnceLock<RwLock<Option<std::sync::mpsc::Sender<Arc<Task>>>>>
 
 static EPOLL_REGISTER: LazyLock<mpsc::Sender<(RawFd, epoll::PollType, Waker)>> = LazyLock::new(epoll::epoll_task);
 
-static SLEEP_REGISTER: LazyLock<std::sync::mpsc::Sender<(Instant, Box<Waker>)>> = LazyLock::new(|| {
+static SLEEP_REGISTER: LazyLock<std::sync::mpsc::Sender<(Instant, Waker)>> = LazyLock::new(|| {
   let (sender, receiver) = std::sync::mpsc::channel();
 
   std::thread::Builder::new()
@@ -314,7 +314,7 @@ pub(super) fn sleep_seconds(seconds: impl Into<f64>) -> impl Future<Output = ()>
       Poll::Ready(())
     } else {
       // Register a sleep waker
-      SLEEP_REGISTER.send((target, Box::new(cx.waker().clone()))).unwrap();
+      SLEEP_REGISTER.send((target, cx.waker().clone())).unwrap();
       Poll::Pending
     }
   })
@@ -574,7 +574,7 @@ where
       Poll::Pending => {
         crate::trace!("Registering a timeout waker");
         let waker = cx.waker().clone();
-        SLEEP_REGISTER.send((timeout_at, Box::new(waker))).unwrap();
+        SLEEP_REGISTER.send((timeout_at, waker)).unwrap();
         Poll::Pending
       }
     }
@@ -763,7 +763,7 @@ mod epoll {
 mod sleep {
   use std::{collections::BinaryHeap, task::Waker, time::Instant};
 
-  struct InstantAndWaker(Instant, Box<Waker>);
+  struct InstantAndWaker(Instant, Waker);
 
   impl PartialEq for InstantAndWaker {
     fn eq(&self, other: &Self) -> bool {
@@ -785,7 +785,7 @@ mod sleep {
     }
   }
 
-  pub(super) fn sleep_task(recv: std::sync::mpsc::Receiver<(Instant, Box<Waker>)>) {
+  pub(super) fn sleep_task(recv: std::sync::mpsc::Receiver<(Instant, Waker)>) {
     let mut sleep_queue: BinaryHeap<InstantAndWaker> = BinaryHeap::new();
 
     loop {
