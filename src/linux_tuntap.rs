@@ -3,7 +3,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use crate::leo_async::{self, ArcFd, DSSResult};
 
 pub(crate) struct TunInterface {
-  fd: ArcFd
+  fd: ArcFd,
 }
 
 fn fd_make_nonblocking(fd: &ArcFd) -> DSSResult<()> {
@@ -57,7 +57,7 @@ impl TunInterface {
     }
 
     Self {
-      fd: ArcFd::from_owned_fd(unsafe { OwnedFd::from_raw_fd(fd) })
+      fd: ArcFd::from_owned_fd(unsafe { OwnedFd::from_raw_fd(fd) }),
     }
   }
 

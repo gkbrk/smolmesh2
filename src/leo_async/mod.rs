@@ -131,17 +131,15 @@ pub(super) fn read_fd<'a>(fd: &'a ArcFd, buf: &'a mut [u8]) -> impl Future<Outpu
 }
 
 pub(super) fn write_fd<'a>(fd: &'a ArcFd, buf: &'a [u8]) -> impl Future<Output = DSSResult<usize>> + 'a {
-  std::future::poll_fn(move |cx| {
-    match nix::unistd::write(fd, buf) {
-      Ok(n) => Poll::Ready(Ok(n)),
-      Err(nix::errno::Errno::EAGAIN) => {
-        EPOLL_REGISTER
-          .send((fd.as_raw_fd(), epoll::PollType::Write, cx.waker().clone()))
-          .unwrap();
-        Poll::Pending
-      }
-      Err(e) => Poll::Ready(Err(e.into())),
+  std::future::poll_fn(move |cx| match nix::unistd::write(fd, buf) {
+    Ok(n) => Poll::Ready(Ok(n)),
+    Err(nix::errno::Errno::EAGAIN) => {
+      EPOLL_REGISTER
+        .send((fd.as_raw_fd(), epoll::PollType::Write, cx.waker().clone()))
+        .unwrap();
+      Poll::Pending
     }
+    Err(e) => Poll::Ready(Err(e.into())),
   })
 }
 
@@ -325,7 +323,7 @@ fn get_errno() -> i32 {
 pub(super) mod socket {
   use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
-  use super::{fd_wait_readable, fd_wait_writable, get_errno, ArcFd, DSSResult};
+  use super::{ArcFd, DSSResult, fd_wait_writable, get_errno};
 
   pub fn socket() -> DSSResult<ArcFd> {
     let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
@@ -336,10 +334,7 @@ pub(super) mod socket {
     }
   }
 
-  pub async fn connect<'a>(
-    sock: &'a ArcFd,
-    addr: &std::net::SocketAddr,
-  ) -> DSSResult<()> {
+  pub async fn connect<'a>(sock: &'a ArcFd, addr: &std::net::SocketAddr) -> DSSResult<()> {
     let addr = match addr {
       std::net::SocketAddr::V4(addr) => addr,
       _ => unimplemented!("Cannot connect to IPv6 addresses"),
