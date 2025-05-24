@@ -118,8 +118,7 @@ static SLEEP_REGISTER: LazyLock<std::sync::mpsc::Sender<(Instant, Waker)>> = Laz
 });
 
 pub(super) fn read_fd<'a>(fd: &'a ArcFd, buf: &'a mut [u8]) -> impl Future<Output = DSSResult<usize>> + 'a {
-  let raw_fd = fd.as_raw_fd();
-  std::future::poll_fn(move |cx| match nix::unistd::read(raw_fd, buf) {
+  std::future::poll_fn(move |cx| match nix::unistd::read(fd, buf) {
     Ok(n) => Poll::Ready(Ok(n)),
     Err(nix::errno::Errno::EAGAIN) => {
       EPOLL_REGISTER
@@ -133,8 +132,7 @@ pub(super) fn read_fd<'a>(fd: &'a ArcFd, buf: &'a mut [u8]) -> impl Future<Outpu
 
 pub(super) fn write_fd<'a>(fd: &'a ArcFd, buf: &'a [u8]) -> impl Future<Output = DSSResult<usize>> + 'a {
   std::future::poll_fn(move |cx| {
-    let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd.as_raw_fd()) };
-    match nix::unistd::write(borrowed_fd, buf) {
+    match nix::unistd::write(fd, buf) {
       Ok(n) => Poll::Ready(Ok(n)),
       Err(nix::errno::Errno::EAGAIN) => {
         EPOLL_REGISTER

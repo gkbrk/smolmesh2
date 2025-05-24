@@ -12,11 +12,11 @@ codegen-units = 1
 json = "0.12.4"
 lazy_static = "1.5.0"
 chrono = "0.4.39"
-libc = "0.2.169"
+libc = "0.2.172"
 libloading = "0.8.6"
 
 [dependencies.nix]
-version = "0.29.0"
+version = "0.30.1"
 features = ["net", "poll", "event"]
 
 [dependencies.windows-sys]
