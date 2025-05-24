@@ -340,7 +340,7 @@ pub(super) mod socket {
     }
   }
 
-  pub async fn connect<'a>(sock: &'a ArcFd, addr: &std::net::SocketAddr) -> DSSResult<()> {
+  pub async fn connect(sock: &ArcFd, addr: &std::net::SocketAddr) -> DSSResult<()> {
     let addr = match addr {
       std::net::SocketAddr::V4(addr) => addr,
       _ => unimplemented!("Cannot connect to IPv6 addresses"),
