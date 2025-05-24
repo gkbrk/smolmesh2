@@ -253,7 +253,9 @@ async fn connect_impl(
         buf
       };
 
-      assert_eq!(expected_keyfinder, Vec::from(recv_keyfinder));
+      if expected_keyfinder != recv_keyfinder {
+        return Err("Got incorrect keyfinder".into());
+      }
 
       log!("Got correct keyfinder");
 
@@ -287,7 +289,10 @@ async fn connect_impl(
 
         // Verify MAC
         let expected_mac = crate::speck::multispeck2(&recv_mac_key, &data);
-        assert_eq!(expected_mac, Vec::from(mac));
+
+        if expected_mac != mac {
+          return Err("MAC verification failed".into());
+        }
 
         if let Err(err) = incoming.send((data, sender_tx.clone())) {
           log!("Error sending data: {:?}", err);
@@ -459,7 +464,10 @@ pub async fn handle_connection(
 
         // Verify MAC
         let expected_mac = crate::speck::multispeck2(&recv_mac_key, &data);
-        assert_eq!(expected_mac, Vec::from(mac));
+
+        if expected_mac != mac {
+          return Err("MAC verification failed".into());
+        }
 
         incoming.send((data, sender_tx.clone())).unwrap();
       }
