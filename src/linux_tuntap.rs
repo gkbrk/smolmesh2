@@ -38,11 +38,7 @@ fn nix_libc_open(path: &str) -> i32 {
 
 impl TunInterface {
   pub(crate) fn open(ifname: &str) -> Self {
-    let fd: i32;
-
-    unsafe {
-      fd = nix_libc_open("/dev/net/tun");
-    }
+    let fd = nix_libc_open("/dev/net/tun");
 
     let flags = nix::net::if_::InterfaceFlags::IFF_TUN | nix::net::if_::InterfaceFlags::IFF_NO_PI;
     let mut ifr = [0u8; 16 + 2];
