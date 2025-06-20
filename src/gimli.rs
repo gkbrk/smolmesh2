@@ -133,6 +133,9 @@ mod tests {
 
   #[test]
   fn test_gimlihash_2() {
-    gimli_hash_assert(b"There's plenty for the both of us, may the best Dwarf win.", "4afb3ff784c7ad6943d49cf5da79facfa7c4434e1ce44f5dd4b28f91a84d22c8");
+    gimli_hash_assert(
+      b"There's plenty for the both of us, may the best Dwarf win.",
+      "4afb3ff784c7ad6943d49cf5da79facfa7c4434e1ce44f5dd4b28f91a84d22c8",
+    );
   }
 }

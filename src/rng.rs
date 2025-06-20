@@ -1,14 +1,14 @@
-use std::io::Write;
 use crate::gimli;
+use std::io::Write;
 
 trait UnwrapUnreachable<T> {
   fn unwrap_unreachable(self) -> T;
 }
 
 impl<T> UnwrapUnreachable<T> for Option<T> {
-    fn unwrap_unreachable(self) -> T {
-      self.unwrap_or_else(|| unsafe {  std::hint::unreachable_unchecked() })
-    }
+  fn unwrap_unreachable(self) -> T {
+    self.unwrap_or_else(|| unsafe { std::hint::unreachable_unchecked() })
+  }
 }
 
 impl<T, E> UnwrapUnreachable<T> for Result<T, E> {
