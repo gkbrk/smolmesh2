@@ -45,8 +45,8 @@ impl Rng {
 
   pub fn u64(&mut self) -> u64 {
     let res = {
-      let a = self.state.buf()[0..8].try_into().unwrap_unreachable();
-      u64::from_le_bytes(a)
+      let buf = self.state.buf();
+      u64::from_le_bytes([buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]])
     };
     self.state.permute();
     res
