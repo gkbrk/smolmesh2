@@ -8,6 +8,7 @@ use std::{
 
 use leo_async::DSSResult;
 
+mod gimli;
 mod all_senders;
 mod ip_addr;
 mod legacy_tcp;
