@@ -1,71 +1,55 @@
 use std::io::Write;
+use crate::gimli;
+
+trait UnwrapUnreachable<T> {
+  fn unwrap_unreachable(self) -> T;
+}
+
+impl<T> UnwrapUnreachable<T> for Option<T> {
+    fn unwrap_unreachable(self) -> T {
+      self.unwrap_or_else(|| unsafe {  std::hint::unreachable_unchecked() })
+    }
+}
+
+impl<T, E> UnwrapUnreachable<T> for Result<T, E> {
+  fn unwrap_unreachable(self) -> T {
+    self.unwrap_or_else(|_| unsafe { std::hint::unreachable_unchecked() })
+  }
+}
 
 pub struct Rng {
-  key: [u64; 32],
-  ctr_high: u64,
-  ctr_low: u64,
+  state: gimli::GimliState,
 }
 
 impl Rng {
   pub fn new() -> Self {
-    let key = {
-      let mut key = [0; 32];
-
-      for i in 0..32 {
-        key[i] = crate::raw_speck::ernd(69, 420, i as u64).0;
-      }
-
-      key
-    };
-
     Rng {
-      key,
-      ctr_high: 0,
-      ctr_low: 0,
+      state: gimli::GimliState::new(),
     }
   }
 
-  fn incr_ctr(&mut self) {
-    self.ctr_low = self.ctr_low.wrapping_add(1);
-    if self.ctr_low == 0 {
-      self.ctr_high = self.ctr_high.wrapping_add(1);
+  pub fn absorb(&mut self, data: &[u8]) {
+    // Absorb data length
+    for (i, c) in data.len().to_le_bytes().iter().enumerate() {
+      self.state.buf_mut()[i] ^= *c;
     }
-  }
+    self.state.permute();
 
-  pub fn absorb(&mut self, data: u64) {
-    self.incr_ctr();
-
-    for i in 0..32 {
-      let mut a = self.key[i];
-      let mut b = i as u64;
-
-      (a, b) = crate::raw_speck::ernd(a, b, data);
-      (a, b) = crate::raw_speck::ernd(a, b, self.ctr_high);
-      (a, b) = crate::raw_speck::ernd(a, b, self.ctr_low);
-
-      for j in 0..32 {
-        (a, b) = crate::raw_speck::ernd(a, b, self.key[j]);
+    for chunk in data.chunks(gimli::RATE_BYTES) {
+      for (i, c) in chunk.iter().enumerate() {
+        self.state.buf_mut()[i] ^= *c;
       }
-
-      (a, _) = crate::raw_speck::ernd(a, b, data);
-
-      self.key[i] = a;
+      self.state.permute();
     }
-
-    self.incr_ctr();
   }
 
   pub fn u64(&mut self) -> u64 {
-    let mut a = self.ctr_high;
-    let mut b = self.ctr_low;
-
-    for i in 0..32 {
-      (a, b) = crate::raw_speck::ernd(a, b, self.key[i]);
-    }
-
-    self.incr_ctr();
-
-    a
+    let res = {
+      let a = self.state.buf()[0..8].try_into().unwrap_unreachable();
+      u64::from_le_bytes(a)
+    };
+    self.state.permute();
+    res
   }
 
   pub fn uniform(&mut self) -> f64 {
@@ -75,10 +59,7 @@ impl Rng {
 
 impl Write for Rng {
   fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-    for byte in buf {
-      self.absorb(*byte as u64);
-    }
-
+    self.absorb(buf);
     Ok(buf.len())
   }
 
@@ -92,7 +73,7 @@ lazy_static! {
 }
 
 pub fn absorb(data: u64) {
-  RNG.lock().unwrap().absorb(data);
+  RNG.lock().unwrap().absorb(&data.to_le_bytes());
 }
 
 pub fn u64() -> u64 {
@@ -177,9 +158,4 @@ pub fn init_rng() {
 
   // Attempt to read from /dev/urandom
   read_from_urandom(&mut *rng);
-
-  // Mix a bit
-  for i in 0..64 {
-    rng.absorb(i);
-  }
 }
