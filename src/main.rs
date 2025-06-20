@@ -8,8 +8,8 @@ use std::{
 
 use leo_async::DSSResult;
 
-mod gimli;
 mod all_senders;
+mod gimli;
 mod ip_addr;
 mod legacy_tcp;
 mod leo_async;
@@ -19,7 +19,6 @@ mod log;
 mod raw_speck;
 mod rng;
 mod seen_packets;
-mod speck;
 #[cfg(windows)]
 mod windows_tuntap;
 #[cfg(windows)]
