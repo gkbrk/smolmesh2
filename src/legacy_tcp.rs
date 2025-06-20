@@ -1,81 +1,41 @@
 use std::os::fd::AsRawFd;
 
 use crate::leo_async::{self, ArcFd};
-use crate::{DSSResult, all_senders, info, log};
+use crate::{DSSResult, all_senders, gimli, info, log};
 
 struct KeystreamGen {
-  round_keys: [u64; 32],
-  ctr_high: u64,
-  ctr_low: u64,
-  n: u64,
-  a: u64,
-  b: u64,
+  gimli_state: gimli::GimliState,
+  n: u8,
 }
 
 impl KeystreamGen {
   fn new(key: &[u8]) -> Self {
-    let rk = {
-      let mut rk = [0u64; 32];
-      let round_keys = crate::raw_speck::key_schedule(key, 32);
+    let mut state = gimli::GimliState::new();
+    state.buf_mut()[0..8].copy_from_slice(&key.len().to_le_bytes());
+    state.permute();
 
-      rk[..32].copy_from_slice(&round_keys[..32]);
+    for chunk in key.chunks(gimli::RATE_BYTES) {
+      for (i, c) in chunk.iter().enumerate() {
+        state.buf_mut()[i] ^= *c;
+      }
+      state.permute();
+    }
 
-      rk
-    };
-
-    KeystreamGen {
-      round_keys: rk,
-      ctr_high: 0,
-      ctr_low: 0,
+    Self {
+      gimli_state: state,
       n: 0,
-      a: 0,
-      b: 0,
     }
-  }
-
-  #[inline(always)]
-  fn incr_ctr(&mut self) {
-    self.ctr_low = self.ctr_low.wrapping_add(1);
-    if self.ctr_low == 0 {
-      self.ctr_high = self.ctr_high.wrapping_add(1);
-      assert_ne!(self.ctr_high, 0);
-    }
-  }
-
-  #[inline(always)]
-  fn iter_block(&mut self) {
-    self.incr_ctr();
-
-    let mut a = self.ctr_high;
-    let mut b = self.ctr_low;
-
-    for i in 0..32 {
-      (a, b) = crate::raw_speck::ernd(a, b, self.round_keys[i]);
-    }
-
-    self.a = a;
-    self.b = b;
   }
 
   #[inline(always)]
   fn next(&mut self) -> u8 {
-    let nb = self.n % 16;
-
-    if nb == 0 {
-      self.iter_block();
+    let byte = self.gimli_state.buf()[self.n as usize];
+    self.n += 1;
+    if self.n == 16 {
+      self.gimli_state.permute();
+      self.n = 0;
     }
-
-    if nb < 8 {
-      let res = self.a & 0xff;
-      self.a >>= 8;
-      self.n += 1;
-      res as u8
-    } else {
-      let res = self.b & 0xff;
-      self.b >>= 8;
-      self.n += 1;
-      res as u8
-    }
+    byte
   }
 }
 
@@ -156,6 +116,52 @@ async fn connect_timeout(addr: &std::net::SocketAddr, timeout: std::time::Durati
   Ok(sock)
 }
 
+fn multigimli3(x: &[u8], y: &[u8], z: &[u8]) -> [u8; 16] {
+  let mut state = gimli::GimliState::new();
+
+  state.buf_mut()[0..8].copy_from_slice(&x.len().to_le_bytes());
+  state.permute();
+  state.buf_mut()[0..8].copy_from_slice(&y.len().to_le_bytes());
+  state.permute();
+  state.buf_mut()[0..8].copy_from_slice(&z.len().to_le_bytes());
+  state.permute();
+
+  for buf in [x, y, z].iter() {
+    for chunk in buf.chunks(gimli::RATE_BYTES) {
+      for (i, c) in chunk.iter().enumerate() {
+        state.buf_mut()[i] ^= *c;
+      }
+      state.permute();
+    }
+  }
+
+  let mut res = [0u8; 16];
+  res.copy_from_slice(&state.buf()[0..16]);
+  res
+}
+
+fn multigimli2(x: &[u8], y: &[u8]) -> [u8; 16] {
+  let mut state = gimli::GimliState::new();
+
+  state.buf_mut()[0..8].copy_from_slice(&x.len().to_le_bytes());
+  state.permute();
+  state.buf_mut()[0..8].copy_from_slice(&y.len().to_le_bytes());
+  state.permute();
+
+  for buf in [x, y].iter() {
+    for chunk in buf.chunks(gimli::RATE_BYTES) {
+      for (i, c) in chunk.iter().enumerate() {
+        state.buf_mut()[i] ^= *c;
+      }
+      state.permute();
+    }
+  }
+
+  let mut res = [0u8; 16];
+  res.copy_from_slice(&state.buf()[0..16]);
+  res
+}
+
 async fn connect_impl(
   host: &str,
   port: u16,
@@ -184,7 +190,7 @@ async fn connect_impl(
     iv
   };
 
-  let keyfinder = crate::speck::multispeck3(key, &sender_iv, b"keyfinder");
+  let keyfinder = multigimli3(key, &sender_iv, b"keyfinder");
 
   fd_writeall_timeout(&write_sock, &sender_iv, 30_000).await?;
   fd_writeall_timeout(&write_sock, &keyfinder, 30_000).await?;
@@ -193,8 +199,8 @@ async fn connect_impl(
 
   all_senders.add(sender_tx.clone());
 
-  let send_enc_key = crate::speck::multispeck3(key, &sender_iv, b"enc_key");
-  let send_mac_key = crate::speck::multispeck3(key, &sender_iv, b"mac_key");
+  let send_enc_key = multigimli3(key, &sender_iv, b"enc_key");
+  let send_mac_key = multigimli3(key, &sender_iv, b"mac_key");
 
   let send_task = {
     async move {
@@ -209,7 +215,7 @@ async fn connect_impl(
           continue;
         }
 
-        let mac = crate::speck::multispeck2(&send_mac_key, &data);
+        let mac = multigimli2(&send_mac_key, &data);
 
         let mut plaintext_data = Vec::with_capacity(data.len() + 2 + 16);
         plaintext_data.extend_from_slice(&(data.len() as u16).to_le_bytes());
@@ -246,7 +252,7 @@ async fn connect_impl(
         buf
       };
 
-      let expected_keyfinder = crate::speck::multispeck3(key, &recv_iv, b"keyfinder");
+      let expected_keyfinder = multigimli3(key, &recv_iv, b"keyfinder");
       let recv_keyfinder = {
         let mut buf = [0u8; 16];
         fd_readexact_timeout(&read_sock, &mut buf, 30000).await?;
@@ -259,8 +265,8 @@ async fn connect_impl(
 
       log!("Got correct keyfinder");
 
-      let recv_enc_key = crate::speck::multispeck3(key, &recv_iv, b"enc_key");
-      let recv_mac_key = crate::speck::multispeck3(key, &recv_iv, b"mac_key");
+      let recv_enc_key = multigimli3(key, &recv_iv, b"enc_key");
+      let recv_mac_key = multigimli3(key, &recv_iv, b"mac_key");
 
       let mut keystream = KeystreamGen::new(&recv_enc_key);
 
@@ -288,7 +294,7 @@ async fn connect_impl(
         }
 
         // Verify MAC
-        let expected_mac = crate::speck::multispeck2(&recv_mac_key, &data);
+        let expected_mac = multigimli2(&recv_mac_key, &data);
 
         if expected_mac != mac {
           return Err("MAC verification failed".into());
@@ -365,7 +371,7 @@ pub async fn handle_connection(
   let mut found_key = None;
 
   for key in keys {
-    let expected_keyfinder = crate::speck::multispeck3(&key, &incoming_iv, b"keyfinder");
+    let expected_keyfinder = multigimli3(&key, &incoming_iv, b"keyfinder");
 
     if expected_keyfinder == incoming_keyfinder {
       found_key = Some(key);
@@ -379,8 +385,8 @@ pub async fn handle_connection(
 
   let found_key = found_key.unwrap();
 
-  let recv_enc_key = crate::speck::multispeck3(&found_key, &incoming_iv, b"enc_key");
-  let recv_mac_key = crate::speck::multispeck3(&found_key, &incoming_iv, b"mac_key");
+  let recv_enc_key = multigimli3(&found_key, &incoming_iv, b"enc_key");
+  let recv_mac_key = multigimli3(&found_key, &incoming_iv, b"mac_key");
 
   // Send our keyfinder
   let send_iv = {
@@ -390,13 +396,13 @@ pub async fn handle_connection(
     iv
   };
 
-  let send_keyfinder = crate::speck::multispeck3(&found_key, &send_iv, b"keyfinder");
+  let send_keyfinder = multigimli3(&found_key, &send_iv, b"keyfinder");
 
   fd_writeall_timeout(&write_sock, &send_iv, 30_000).await?;
   fd_writeall_timeout(&write_sock, &send_keyfinder, 30_000).await?;
 
-  let send_enc_key = crate::speck::multispeck3(&found_key, &send_iv, b"enc_key");
-  let send_mac_key = crate::speck::multispeck3(&found_key, &send_iv, b"mac_key");
+  let send_enc_key = multigimli3(&found_key, &send_iv, b"enc_key");
+  let send_mac_key = multigimli3(&found_key, &send_iv, b"mac_key");
 
   let (sender_tx, sender_rx) = leo_async::mpsc::channel();
   all_senders.add(sender_tx.clone());
@@ -413,7 +419,7 @@ pub async fn handle_connection(
           continue;
         }
 
-        let mac = crate::speck::multispeck2(&send_mac_key, &packet);
+        let mac = multigimli2(&send_mac_key, &packet);
 
         let mut plaintext_data = Vec::with_capacity(packet.len() + 2 + 16);
         plaintext_data.extend_from_slice(&(packet.len() as u16).to_le_bytes());
@@ -463,7 +469,7 @@ pub async fn handle_connection(
         }
 
         // Verify MAC
-        let expected_mac = crate::speck::multispeck2(&recv_mac_key, &data);
+        let expected_mac = multigimli2(&recv_mac_key, &data);
 
         if expected_mac != mac {
           return Err("MAC verification failed".into());

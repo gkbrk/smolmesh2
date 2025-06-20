@@ -63,7 +63,7 @@ pub(crate) fn gimli(state: &mut [u32; 12]) {
   }
 }
 
-pub fn gimli_hash(input: &[u8], out: &mut [u8]) {
+pub(crate) fn gimli_hash(input: &[u8], out: &mut [u8]) {
   let mut state = GimliState::new();
 
   // --- Absorb phase ---
