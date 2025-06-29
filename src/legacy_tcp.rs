@@ -1,6 +1,6 @@
 use std::os::fd::AsRawFd;
 
-use bytes::{Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::leo_async::{self, ArcFd};
 use crate::{DSSResult, all_senders, gimli, info, log};
@@ -415,6 +415,8 @@ pub async fn handle_connection(
   let sender_task = {
     async move {
       let mut keystream = KeystreamGen::new(&send_enc_key);
+      let mut plaintext_data = BytesMut::with_capacity(2048);
+      let mut ciphertext_data = BytesMut::with_capacity(2048);
 
       loop {
         leo_async::yield_now().await;
@@ -426,16 +428,16 @@ pub async fn handle_connection(
 
         let mac = multigimli2(&send_mac_key, &packet);
 
-        let mut plaintext_data = Vec::with_capacity(packet.len() + 2 + 16);
+        plaintext_data.clear();
+        ciphertext_data.clear();
+
         plaintext_data.extend_from_slice(&(packet.len() as u16).to_le_bytes());
         plaintext_data.extend_from_slice(&packet);
         plaintext_data.extend_from_slice(&mac);
 
-        let mut ciphertext_data = Vec::with_capacity(plaintext_data.len());
-
-        for byte in plaintext_data {
+        for byte in plaintext_data.iter() {
           let keystream_byte = keystream.next();
-          ciphertext_data.push(byte ^ keystream_byte);
+          ciphertext_data.put_u8(byte ^ keystream_byte);
         }
 
         match fd_writeall_timeout(&write_sock, &ciphertext_data, 30_000).await {
