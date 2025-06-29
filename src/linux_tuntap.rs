@@ -138,11 +138,11 @@ impl TunInterface {
             }
           };
 
-          netpacket.clear();
           netpacket.extend_from_slice(&crate::millis().to_le_bytes());
           netpacket.put_u8(3);
           netpacket.extend_from_slice(&packet);
-          all_senders.send_to_fastest(target_addr, netpacket.clone().freeze());
+          let to_send = netpacket.split_to(netpacket.len()).freeze();
+          all_senders.send_to_fastest(target_addr, to_send);
         }
       });
     }

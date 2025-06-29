@@ -305,7 +305,9 @@ async fn connect_impl(
           return Err("MAC verification failed".into());
         }
 
-        if let Err(err) = incoming.send((data.clone().freeze(), sender_tx.clone())) {
+        let to_send = data.split_to(data.len()).freeze();
+
+        if let Err(err) = incoming.send((to_send, sender_tx.clone())) {
           log!("Error sending data: {:?}", err);
           break;
         }
@@ -483,7 +485,8 @@ pub async fn handle_connection(
           return Err("MAC verification failed".into());
         }
 
-        incoming.send((data.clone().freeze(), sender_tx.clone())).unwrap();
+        let to_send = data.split_to(data.len()).freeze();
+        incoming.send((to_send, sender_tx.clone())).unwrap();
       }
 
       DSSResult::Ok(())
