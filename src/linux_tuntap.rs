@@ -111,11 +111,10 @@ impl TunInterface {
     {
       leo_async::spawn(async move {
         let all_senders = crate::all_senders::get();
-        let mut packet = vec![0; 2048];
         let mut netpacket = BytesMut::new();
 
         loop {
-          packet.resize(2048, 0);
+          let mut packet = [0; 2048];
           let amount = match leo_async::read_fd(&read_fd, &mut packet).await {
             Ok(0) => break,
             Ok(x) => x,
@@ -124,8 +123,7 @@ impl TunInterface {
               continue;
             }
           };
-          leo_async::yield_now().await;
-          packet.truncate(amount);
+          let packet = packet.split_at(amount as usize).0;
 
           let ip_version = (packet[0] & 0b11110000) >> 4;
 
@@ -137,6 +135,8 @@ impl TunInterface {
               continue;
             }
           };
+
+          netpacket.reserve(8 + 1 + packet.len());
 
           netpacket.extend_from_slice(&crate::millis().to_le_bytes());
           netpacket.put_u8(3);
@@ -154,7 +154,6 @@ impl TunInterface {
       leo_async::spawn(async move {
         loop {
           if let Some(packet) = receiver.recv().await {
-            leo_async::yield_now().await;
             leo_async::write_fd(&write_fd, &packet).await.unwrap();
           }
         }

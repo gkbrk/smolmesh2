@@ -207,8 +207,7 @@ async fn connect_impl(
   let send_task = {
     async move {
       let mut keystream = KeystreamGen::new(&send_enc_key);
-      let mut plaintext_data = BytesMut::with_capacity(2048);
-      let mut ciphertext_data = BytesMut::with_capacity(2048);
+      let mut packet_data = BytesMut::with_capacity(2048);
 
       loop {
         let data = sender_rx.recv().await.unwrap();
@@ -221,19 +220,19 @@ async fn connect_impl(
 
         let mac = multigimli2(&send_mac_key, &data);
 
-        plaintext_data.clear();
-        ciphertext_data.clear();
+        packet_data.reserve(2 + data.len() + 16);
 
-        plaintext_data.extend_from_slice(&(data.len() as u16).to_le_bytes());
-        plaintext_data.extend_from_slice(&data);
-        plaintext_data.extend_from_slice(&mac);
+        packet_data.extend_from_slice(&(data.len() as u16).to_le_bytes());
+        packet_data.extend_from_slice(&data);
+        packet_data.extend_from_slice(&mac);
 
-        for byte in plaintext_data.iter() {
-          let keystream_byte = keystream.next();
-          ciphertext_data.put_u8(byte ^ keystream_byte);
+        for byte in packet_data.iter_mut() {
+          *byte ^= keystream.next();
         }
 
-        match fd_writeall_timeout(&write_sock, &ciphertext_data, 30_000).await {
+        let to_send = packet_data.split_to(packet_data.len()).freeze();
+
+        match fd_writeall_timeout(&write_sock, &to_send, 30_000).await {
           Ok(_) => {}
           Err(e) => {
             crate::log!("connect_impl send_task write error: {}", e);
@@ -417,8 +416,7 @@ pub async fn handle_connection(
   let sender_task = {
     async move {
       let mut keystream = KeystreamGen::new(&send_enc_key);
-      let mut plaintext_data = BytesMut::with_capacity(2048);
-      let mut ciphertext_data = BytesMut::with_capacity(2048);
+      let mut packet_data = BytesMut::with_capacity(2048);
 
       loop {
         leo_async::yield_now().await;
@@ -430,19 +428,19 @@ pub async fn handle_connection(
 
         let mac = multigimli2(&send_mac_key, &packet);
 
-        plaintext_data.clear();
-        ciphertext_data.clear();
+        packet_data.reserve(2 + packet.len() + 16);
 
-        plaintext_data.extend_from_slice(&(packet.len() as u16).to_le_bytes());
-        plaintext_data.extend_from_slice(&packet);
-        plaintext_data.extend_from_slice(&mac);
+        packet_data.extend_from_slice(&(packet.len() as u16).to_le_bytes());
+        packet_data.extend_from_slice(&packet);
+        packet_data.extend_from_slice(&mac);
 
-        for byte in plaintext_data.iter() {
-          let keystream_byte = keystream.next();
-          ciphertext_data.put_u8(byte ^ keystream_byte);
+        for byte in packet_data.iter_mut() {
+          *byte ^= keystream.next();
         }
 
-        match fd_writeall_timeout(&write_sock, &ciphertext_data, 30_000).await {
+        let to_send = packet_data.split_to(packet_data.len()).freeze();
+
+        match fd_writeall_timeout(&write_sock, &to_send, 30_000).await {
           Ok(_) => {}
           Err(_) => return,
         }
