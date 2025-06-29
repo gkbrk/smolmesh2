@@ -273,6 +273,7 @@ async fn connect_impl(
       let recv_mac_key = multigimli3(key, &recv_iv, b"mac_key");
 
       let mut keystream = KeystreamGen::new(&recv_enc_key);
+      let mut data = BytesMut::with_capacity(2048);
 
       loop {
         leo_async::yield_now().await;
@@ -284,14 +285,11 @@ async fn connect_impl(
         let len = u16::from_le_bytes(len_buf);
 
         // Read and decrypt data
-        let data = {
-          let mut data = BytesMut::zeroed(len as usize);
-          fd_readexact_timeout(&read_sock, &mut data, 30_000).await?;
-          for byte in data.iter_mut() {
-            *byte ^= keystream.next();
-          }
-          data.freeze()
-        };
+        data.resize(len as usize, 0);
+        fd_readexact_timeout(&read_sock, &mut data, 30_000).await?;
+        for byte in data.iter_mut() {
+          *byte ^= keystream.next();
+        }
 
         // Read and decrypt MAC
         let mut mac = [0u8; 16];
@@ -307,7 +305,7 @@ async fn connect_impl(
           return Err("MAC verification failed".into());
         }
 
-        if let Err(err) = incoming.send((data, sender_tx.clone())) {
+        if let Err(err) = incoming.send((data.clone().freeze(), sender_tx.clone())) {
           log!("Error sending data: {:?}", err);
           break;
         }
@@ -453,6 +451,7 @@ pub async fn handle_connection(
   let recv_task = {
     async move {
       let mut keystream = KeystreamGen::new(&recv_enc_key);
+      let mut data = BytesMut::with_capacity(2048);
 
       loop {
         leo_async::yield_now().await;
@@ -464,14 +463,11 @@ pub async fn handle_connection(
         let len = u16::from_le_bytes(len_buf);
 
         // Read and decrypt data
-        let data = {
-          let mut data = BytesMut::zeroed(len as usize);
-          fd_readexact_timeout(&read_sock, &mut data, 30_000).await?;
-          for byte in data.iter_mut() {
-            *byte ^= keystream.next();
-          }
-          data.freeze()
-        };
+        data.resize(len as usize, 0);
+        fd_readexact_timeout(&read_sock, &mut data, 30_000).await?;
+        for byte in data.iter_mut() {
+          *byte ^= keystream.next();
+        }
 
         // Read and decrypt MAC
         let mut mac = [0u8; 16];
@@ -487,7 +483,7 @@ pub async fn handle_connection(
           return Err("MAC verification failed".into());
         }
 
-        incoming.send((data, sender_tx.clone())).unwrap();
+        incoming.send((data.clone().freeze(), sender_tx.clone())).unwrap();
       }
 
       DSSResult::Ok(())
