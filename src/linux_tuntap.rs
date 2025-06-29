@@ -112,6 +112,8 @@ impl TunInterface {
       leo_async::spawn(async move {
         let all_senders = crate::all_senders::get();
         let mut packet = vec![0; 2048];
+        let mut netpacket = BytesMut::new();
+
         loop {
           packet.resize(2048, 0);
           let amount = match leo_async::read_fd(&read_fd, &mut packet).await {
@@ -136,11 +138,11 @@ impl TunInterface {
             }
           };
 
-          let mut netpacket = BytesMut::new();
+          netpacket.clear();
           netpacket.extend_from_slice(&crate::millis().to_le_bytes());
           netpacket.put_u8(3);
           netpacket.extend_from_slice(&packet);
-          all_senders.send_to_fastest(target_addr, netpacket.freeze());
+          all_senders.send_to_fastest(target_addr, netpacket.clone().freeze());
         }
       });
     }
@@ -153,13 +155,7 @@ impl TunInterface {
         loop {
           if let Some(packet) = receiver.recv().await {
             leo_async::yield_now().await;
-            unsafe {
-              libc::write(
-                write_fd.as_raw_fd(),
-                packet.as_ptr() as *const libc::c_void,
-                packet.len(),
-              );
-            }
+            leo_async::write_fd(&write_fd, &packet).await.unwrap();
           }
         }
       });
