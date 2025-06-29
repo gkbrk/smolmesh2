@@ -273,9 +273,8 @@ where
 }
 
 fn run_forever(task_receiver: std::sync::mpsc::Receiver<Arc<Task>>) {
+  let mut task_set = HashMap::new();
   loop {
-    let mut task_set = HashMap::new();
-
     let task = task_receiver.recv().unwrap();
     task_set.insert(Arc::as_ptr(&task), task);
 
@@ -302,6 +301,7 @@ fn run_forever(task_receiver: std::sync::mpsc::Receiver<Arc<Task>>) {
         error!("Task with no future");
       }
     }
+    task_set.clear();
   }
 }
 
