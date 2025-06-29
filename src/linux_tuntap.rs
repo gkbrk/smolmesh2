@@ -1,5 +1,7 @@
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
+use bytes::{BufMut, Bytes, BytesMut};
+
 use crate::leo_async::{self, ArcFd, DSSResult};
 
 pub(crate) struct TunInterface {
@@ -98,7 +100,7 @@ impl TunInterface {
     proc.spawn().unwrap().wait().unwrap();
   }
 
-  pub(crate) fn run(&self) -> leo_async::mpsc::Sender<Vec<u8>> {
+  pub(crate) fn run(&self) -> leo_async::mpsc::Sender<Bytes> {
     let read_fd = self.fd.dup().unwrap();
     let write_fd = self.fd.dup().unwrap();
 
@@ -109,8 +111,9 @@ impl TunInterface {
     {
       leo_async::spawn(async move {
         let all_senders = crate::all_senders::get();
+        let mut packet = vec![0; 2048];
         loop {
-          let mut packet = vec![0; 2048];
+          packet.resize(2048, 0);
           let amount = match leo_async::read_fd(&read_fd, &mut packet).await {
             Ok(0) => break,
             Ok(x) => x,
@@ -120,10 +123,7 @@ impl TunInterface {
             }
           };
           leo_async::yield_now().await;
-
-          unsafe {
-            packet.set_len(amount as usize);
-          }
+          packet.truncate(amount);
 
           let ip_version = (packet[0] & 0b11110000) >> 4;
 
@@ -136,17 +136,17 @@ impl TunInterface {
             }
           };
 
-          let mut netpacket = Vec::new();
+          let mut netpacket = BytesMut::new();
           netpacket.extend_from_slice(&crate::millis().to_le_bytes());
-          netpacket.push(3);
+          netpacket.put_u8(3);
           netpacket.extend_from_slice(&packet);
-          all_senders.send_to_fastest(target_addr, netpacket);
+          all_senders.send_to_fastest(target_addr, netpacket.freeze());
         }
       });
     }
 
     // network -> tun
-    let (sender, receiver) = leo_async::mpsc::channel::<Vec<u8>>();
+    let (sender, receiver) = leo_async::mpsc::channel::<Bytes>();
 
     {
       leo_async::spawn(async move {

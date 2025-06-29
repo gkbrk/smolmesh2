@@ -3,17 +3,19 @@ use std::sync::LazyLock;
 
 use crate::{info, ip_addr, leo_async};
 
+use bytes::Bytes;
+
 enum AllSendersMessage {
-  AddSender(leo_async::mpsc::Sender<Vec<u8>>),
-  AddFastestTo(u64, ip_addr::IpAddr, leo_async::mpsc::Sender<Vec<u8>>),
-  SendToFastest(ip_addr::IpAddr, Vec<u8>),
-  SendToAll(Vec<u8>),
+  AddSender(leo_async::mpsc::Sender<Bytes>),
+  AddFastestTo(u64, ip_addr::IpAddr, leo_async::mpsc::Sender<Bytes>),
+  SendToFastest(ip_addr::IpAddr, Bytes),
+  SendToAll(Bytes),
   CleanBrokenSenders,
 }
 
 async fn all_senders_task(receiver: leo_async::mpsc::Receiver<AllSendersMessage>) {
-  let mut senders: Vec<leo_async::mpsc::Sender<Vec<u8>>> = Vec::new();
-  let mut fastest_to_address: HashMap<ip_addr::IpAddr, (u64, leo_async::mpsc::Sender<Vec<u8>>)> = HashMap::new();
+  let mut senders: Vec<leo_async::mpsc::Sender<Bytes>> = Vec::new();
+  let mut fastest_to_address: HashMap<ip_addr::IpAddr, (u64, leo_async::mpsc::Sender<Bytes>)> = HashMap::new();
 
   while let Some(msg) = receiver.recv().await {
     match msg {
@@ -39,7 +41,7 @@ async fn all_senders_task(receiver: leo_async::mpsc::Receiver<AllSendersMessage>
       AllSendersMessage::CleanBrokenSenders => {
         let mut num_cleaned = 0usize;
 
-        senders.retain(|x| match x.send(Vec::new()) {
+        senders.retain(|x| match x.send(Bytes::new()) {
           Ok(_) => true,
           Err(_) => {
             num_cleaned += 1;
@@ -70,15 +72,15 @@ pub fn get() -> &'static AllSenders {
 }
 
 impl AllSenders {
-  pub fn add(&self, sender: leo_async::mpsc::Sender<Vec<u8>>) {
+  pub fn add(&self, sender: leo_async::mpsc::Sender<Bytes>) {
     _ = self.sender.send(AllSendersMessage::AddSender(sender));
   }
 
-  pub fn add_fastest_to(&self, millis: u64, addr: crate::ip_addr::IpAddr, sender: leo_async::mpsc::Sender<Vec<u8>>) {
+  pub fn add_fastest_to(&self, millis: u64, addr: crate::ip_addr::IpAddr, sender: leo_async::mpsc::Sender<Bytes>) {
     _ = self.sender.send(AllSendersMessage::AddFastestTo(millis, addr, sender));
   }
 
-  pub fn send_to_fastest(&self, addr: crate::ip_addr::IpAddr, data: Vec<u8>) {
+  pub fn send_to_fastest(&self, addr: crate::ip_addr::IpAddr, data: Bytes) {
     _ = self.sender.send(AllSendersMessage::SendToFastest(addr, data));
   }
 
@@ -86,7 +88,7 @@ impl AllSenders {
     _ = self.sender.send(AllSendersMessage::CleanBrokenSenders);
   }
 
-  pub fn send_all(&self, data: Vec<u8>) {
+  pub fn send_all(&self, data: Bytes) {
     _ = self.sender.send(AllSendersMessage::SendToAll(data));
   }
 }

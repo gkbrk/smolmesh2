@@ -6,6 +6,7 @@ use std::{
   io::Write,
 };
 
+use bytes::{BufMut, Bytes, BytesMut, Buf};
 use leo_async::DSSResult;
 
 mod all_senders;
@@ -64,12 +65,12 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
     let node_name = node_name.clone();
     leo_async::spawn(async move {
       loop {
-        let mut packet = Vec::new();
-        packet.write_all(&millis().to_le_bytes()).unwrap();
-        packet.push(0);
-        packet.write_all(node_name.as_bytes()).unwrap();
+        let mut packet = BytesMut::new();
+        packet.extend_from_slice(&millis().to_le_bytes());
+        packet.put_u8(0);
+        packet.extend_from_slice(node_name.as_bytes());
 
-        all_senders.send_all(packet);
+        all_senders.send_all(packet.freeze());
 
         let delay = 5.0 + rng::uniform() * 5.0;
         leo_async::sleep_seconds(delay).await;
@@ -85,12 +86,12 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
 
     leo_async::spawn(async move {
       loop {
-        let mut packet = Vec::new();
-        packet.write_all(&millis().to_le_bytes()).unwrap();
-        packet.push(2);
+        let mut packet = BytesMut::new();
+        packet.extend_from_slice(&millis().to_le_bytes());
+        packet.put_u8(2);
         packet.extend_from_slice(&addr);
 
-        all_senders.send_all(packet);
+        all_senders.send_all(packet.freeze());
 
         let delay = 5.0 + rng::uniform() * 5.0;
         leo_async::sleep_seconds(delay).await;
@@ -127,7 +128,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
     legacy_tcp::listener(port, keys, sender.clone());
   }
 
-  let mut tun_sender: Option<leo_async::mpsc::Sender<Vec<u8>>> = None;
+  let mut tun_sender: Option<leo_async::mpsc::Sender<Bytes>> = None;
   let mut route_adder: Option<leo_async::mpsc::Sender<ip_addr::IpAddr>> = None;
 
   #[cfg(unix)]
@@ -189,11 +190,11 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
     let orig_data = data.clone();
 
     let cmd = &data[8];
-    let data = &data[9..];
+    let data = data.slice(9..);
 
     match cmd {
       0 => {
-        if let Ok(packet_node_name) = std::str::from_utf8(data) {
+        if let Ok(packet_node_name) = std::str::from_utf8(&data) {
           debug!("Got node name flood for {}", packet_node_name);
           let addr = crate::ip_addr::IpAddr::from_node_name(packet_node_name);
           all_senders.add_fastest_to(ms, addr, _sender);
@@ -212,7 +213,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
           warn!("Invalid IPv6 address length");
           continue;
         }
-        let addr = crate::ip_addr::IpAddr::ipv6_from_buf(data);
+        let addr = crate::ip_addr::IpAddr::ipv6_from_buf(&data);
         all_senders.add_fastest_to(ms, addr, _sender);
         all_senders.send_all(orig_data.clone());
 
@@ -227,7 +228,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
           warn!("Invalid IPv4 address length");
           continue;
         }
-        let addr = crate::ip_addr::IpAddr::ipv4_from_buf(data);
+        let addr = crate::ip_addr::IpAddr::ipv4_from_buf(&data);
         all_senders.add_fastest_to(ms, addr, _sender);
         all_senders.send_all(orig_data.clone());
 
@@ -250,10 +251,10 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
 
         if our_ips.contains(&target_addr) {
           if let Some(sender) = &tun_sender {
-            sender.send(data.to_vec()).unwrap();
+            sender.send(data).unwrap();
           }
         } else {
-          all_senders.send_to_fastest(target_addr, orig_data.to_vec());
+          all_senders.send_to_fastest(target_addr, orig_data);
         }
       }
       _ => {

@@ -1,5 +1,7 @@
 use std::os::fd::AsRawFd;
 
+use bytes::{Bytes, BytesMut};
+
 use crate::leo_async::{self, ArcFd};
 use crate::{DSSResult, all_senders, gimli, info, log};
 
@@ -166,7 +168,7 @@ async fn connect_impl(
   host: &str,
   port: u16,
   key: &[u8],
-  incoming: leo_async::mpsc::Sender<(Vec<u8>, leo_async::mpsc::Sender<Vec<u8>>)>,
+  incoming: leo_async::mpsc::Sender<(Bytes, leo_async::mpsc::Sender<Bytes>)>,
 ) -> DSSResult<()> {
   crate::log!("Connecting to {}:{}", host, port);
   let addr: std::net::SocketAddr = format!("{}:{}", host, port).parse()?;
@@ -280,11 +282,14 @@ async fn connect_impl(
         let len = u16::from_le_bytes(len_buf);
 
         // Read and decrypt data
-        let mut data = vec![0u8; len as usize];
-        fd_readexact_timeout(&read_sock, &mut data, 30_000).await?;
-        for byte in &mut data {
-          *byte ^= keystream.next();
-        }
+        let data = {
+          let mut data = BytesMut::zeroed(len as usize);
+          fd_readexact_timeout(&read_sock, &mut data, 30_000).await?;
+          for byte in data.iter_mut() {
+            *byte ^= keystream.next();
+          }
+          data.freeze()
+        };
 
         // Read and decrypt MAC
         let mut mac = [0u8; 16];
@@ -321,7 +326,7 @@ pub fn create_connection(
   host: &str,
   port: u16,
   key: &[u8],
-  incoming: leo_async::mpsc::Sender<(Vec<u8>, leo_async::mpsc::Sender<Vec<u8>>)>,
+  incoming: leo_async::mpsc::Sender<(Bytes, leo_async::mpsc::Sender<Bytes>)>,
 ) {
   let host = host.to_owned();
   let key = key.to_owned();
@@ -345,7 +350,7 @@ pub fn create_connection(
 pub async fn handle_connection(
   keys: Vec<Vec<u8>>,
   conn: ArcFd,
-  incoming: leo_async::mpsc::Sender<(Vec<u8>, leo_async::mpsc::Sender<Vec<u8>>)>,
+  incoming: leo_async::mpsc::Sender<(Bytes, leo_async::mpsc::Sender<Bytes>)>,
 ) -> DSSResult<()> {
   let all_senders = all_senders::get();
   leo_async::socket::set_nodelay(&conn)?;
@@ -455,11 +460,14 @@ pub async fn handle_connection(
         let len = u16::from_le_bytes(len_buf);
 
         // Read and decrypt data
-        let mut data = vec![0u8; len as usize];
-        fd_readexact_timeout(&read_sock, &mut data, 30_000).await?;
-        for byte in &mut data {
-          *byte ^= keystream.next();
-        }
+        let data = {
+          let mut data = BytesMut::zeroed(len as usize);
+          fd_readexact_timeout(&read_sock, &mut data, 30_000).await?;
+          for byte in data.iter_mut() {
+            *byte ^= keystream.next();
+          }
+          data.freeze()
+        };
 
         // Read and decrypt MAC
         let mut mac = [0u8; 16];
@@ -492,7 +500,7 @@ pub async fn handle_connection(
 pub async fn listener_impl(
   port: u16,
   keys: Vec<Vec<u8>>,
-  incoming: leo_async::mpsc::Sender<(Vec<u8>, leo_async::mpsc::Sender<Vec<u8>>)>,
+  incoming: leo_async::mpsc::Sender<(Bytes, leo_async::mpsc::Sender<Bytes>)>,
 ) -> DSSResult<()> {
   let socket = leo_async::socket::socket()?;
   fd_make_nonblocking(&socket)?;
@@ -526,7 +534,7 @@ pub async fn listener_impl(
 pub fn listener(
   port: u16,
   keys: Vec<Vec<u8>>,
-  incoming: leo_async::mpsc::Sender<(Vec<u8>, leo_async::mpsc::Sender<Vec<u8>>)>,
+  incoming: leo_async::mpsc::Sender<(Bytes, leo_async::mpsc::Sender<Bytes>)>,
 ) {
   leo_async::spawn(async move {
     loop {
