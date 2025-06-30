@@ -1,7 +1,7 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 pub(crate) struct SeenPackets {
-  hashset: std::collections::HashSet<u64>,
+  hashset: rustc_hash::FxHashSet<u64>,
   deque: std::collections::VecDeque<u64>,
   n: usize,
 }
@@ -9,7 +9,7 @@ pub(crate) struct SeenPackets {
 impl SeenPackets {
   pub(crate) fn new(n: usize) -> Self {
     SeenPackets {
-      hashset: std::collections::HashSet::new(),
+      hashset: rustc_hash::FxHashSet::default(),
       deque: std::collections::VecDeque::with_capacity(n),
       n,
     }
@@ -17,7 +17,7 @@ impl SeenPackets {
 
   #[inline(always)]
   fn get_hash(&self, packet: &[u8]) -> u64 {
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = rustc_hash::FxHasher::default();
     packet.hash(&mut hasher);
     hasher.finish()
   }
