@@ -316,7 +316,7 @@ async fn connect_impl(
     }
   };
 
-  leo_async::select2_noresult(send_task, recv_task).await;
+  leo_async::select2_noresult(std::pin::pin!(send_task), std::pin::pin!(recv_task)).await;
 
   crate::info!("Connection finished");
 
@@ -491,7 +491,7 @@ pub async fn handle_connection(
     }
   };
 
-  let res = leo_async::select2_noresult(sender_task, recv_task).await;
+  let res = leo_async::select2_noresult(std::pin::pin!(sender_task), std::pin::pin!(recv_task)).await;
 
   crate::log!("Connection tasks completed: {:?}", res);
 

@@ -1,8 +1,9 @@
 use std::{
-  collections::HashMap,
+  collections::{HashMap, VecDeque},
   future::Future,
   os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
   pin::Pin,
+  rc::Rc,
   sync::{Arc, LazyLock, Mutex, OnceLock, RwLock},
   task::{Poll, Waker},
   time::Instant,
@@ -94,21 +95,20 @@ pub(super) type DSSResult<T> = std::result::Result<T, Box<dyn std::error::Error 
 
 struct Task {
   future: Mutex<Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>>,
-  sender: std::sync::mpsc::Sender<Arc<Task>>,
+  sender: Arc<crossbeam::queue::SegQueue<Arc<Task>>>,
 }
 
 impl std::task::Wake for Task {
   fn wake(self: Arc<Self>) {
-    let sender = self.sender.clone();
-    sender.send(self).unwrap();
+    self.sender.clone().push(self);
   }
 
   fn wake_by_ref(self: &Arc<Self>) {
-    self.sender.send(self.clone()).unwrap();
+    self.sender.clone().push(self.clone());
   }
 }
 
-static TASK_SENDER: OnceLock<RwLock<Option<std::sync::mpsc::Sender<Arc<Task>>>>> = OnceLock::new();
+static TASK_SENDER: OnceLock<Arc<crossbeam::queue::SegQueue<Arc<Task>>>> = OnceLock::new();
 
 static EPOLL_REGISTER: LazyLock<mpsc::Sender<(RawFd, epoll::PollType, Waker)>> = LazyLock::new(epoll::epoll_task);
 
@@ -199,7 +199,7 @@ pub(super) fn spawn<F, T>(future: F)
 where
   F: Future<Output = T> + Send + 'static,
 {
-  let sender = TASK_SENDER.get().unwrap().read().unwrap().as_ref().unwrap().clone();
+  let sender = TASK_SENDER.get().unwrap();
 
   let future = async {
     _ = future.await;
@@ -210,7 +210,7 @@ where
     sender: sender.clone(),
   });
 
-  sender.send(task).unwrap();
+  sender.push(task);
 }
 
 pub(super) fn run_main<F, T>(future: F) -> T
@@ -218,9 +218,10 @@ where
   F: Future<Output = T> + Send + 'static,
   T: Send + 'static + std::fmt::Debug,
 {
-  let (task_sender, task_receiver) = std::sync::mpsc::channel();
-  TASK_SENDER.set(RwLock::new(Some(task_sender.clone()))).unwrap();
-  let t = std::thread::spawn(|| run_forever(task_receiver));
+  let sender = Arc::new(crossbeam::queue::SegQueue::new());
+  TASK_SENDER.set(sender.clone()).unwrap();
+
+  let t = std::thread::spawn(move || run_forever(sender.clone()));
 
   let (result_sender, result_receiver) = std::sync::mpsc::channel();
 
@@ -272,14 +273,19 @@ where
   pollfn
 }
 
-fn run_forever(task_receiver: std::sync::mpsc::Receiver<Arc<Task>>) {
+fn run_forever(task_receiver: Arc<crossbeam::queue::SegQueue<Arc<Task>>>) {
   let mut task_set = HashMap::new();
   loop {
-    let task = task_receiver.recv().unwrap();
-    task_set.insert(Arc::as_ptr(&task), task);
-
-    for task in task_receiver.try_iter() {
-      task_set.insert(Arc::as_ptr(&task), task);
+    loop {
+      if let Some(task) = task_receiver.pop() {
+        task_set.insert(Arc::as_ptr(&task), task);
+      } else {
+        if task_set.is_empty() {
+          std::thread::sleep(std::time::Duration::from_millis(1));
+          continue;
+        }
+        break;
+      }
     }
 
     crate::trace!("Running {} tasks", task_set.len());
@@ -576,7 +582,7 @@ where
   }
 }
 
-pub(super) fn select2_noresult<F1: Future, F2: Future>(f1: F1, f2: F2) -> impl Future<Output = ()> {
+pub(super) fn select2_noresult<F1: Future + Unpin, F2: Future + Unpin>(f1: F1, f2: F2) -> impl Future<Output = ()> {
   struct Select2Future<F1, F2> {
     f1: F1,
     f2: F2,
@@ -603,8 +609,8 @@ pub(super) fn select2_noresult<F1: Future, F2: Future>(f1: F1, f2: F2) -> impl F
   }
 
   Select2Future {
-    f1: Box::pin(f1),
-    f2: Box::pin(f2),
+    f1: f1,
+    f2: f2,
   }
 }
 
