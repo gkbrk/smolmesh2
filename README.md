@@ -39,7 +39,7 @@ The configuration file (`config.json`) should include details such as node name,
 ```json
 {
   "node_name": "example_node",
-  "ipv4_addresses": ["192.168.1.1"],
+  "linux_tuntap": true,
   "transports": [
     {
       "type": "legacy_tcp_connect",
@@ -52,11 +52,13 @@ The configuration file (`config.json`) should include details such as node name,
       "port": 54321,
       "keys": ["allowed_key1", "allowed_key2"]
     }
-  ],
-  "linux_tuntap": true,
-  "windows_tuntap": false
+  ]
 }
 ```
+
+Optional fields:
+- `ipv4_addresses`: Array of IPv4 addresses this node should handle (e.g., `["192.168.1.1"]`)
+- `windows_tuntap`: Boolean to enable Windows TUN/TAP support (default: false)
 
 ## Platform-Specific Features
 
@@ -89,9 +91,9 @@ The configuration file (`config.json`) should include details such as node name,
 
 ## Dependencies
 
-- Linux: TUN/TAP kernel support
-- Windows: Wintun driver (wintun-amd64.dll)
-- Rust standard library and a few external crates
+### System Requirements
+- **Linux:** TUN/TAP kernel support (usually available by default)
+- **Windows:** Wintun driver (wintun-amd64.dll) in the working directory
 
 ## Contributing
 
