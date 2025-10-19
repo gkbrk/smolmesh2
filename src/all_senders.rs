@@ -21,10 +21,10 @@ async fn all_senders_task(receiver: leo_async::mpsc::Receiver<AllSendersMessage>
     match msg {
       AllSendersMessage::AddSender(sender) => senders.push(sender),
       AllSendersMessage::AddFastestTo(millis, addr, sender) => {
-        if let Some((millis_old, _)) = fastest_to_address.get(&addr) {
-          if millis <= *millis_old {
-            continue;
-          }
+        if let Some((millis_old, _)) = fastest_to_address.get(&addr)
+          && millis <= *millis_old
+        {
+          continue;
         }
         fastest_to_address.insert(addr, (millis, sender));
       }

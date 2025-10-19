@@ -1,10 +1,9 @@
 use std::{
-  collections::{HashMap, VecDeque},
+  collections::{HashMap},
   future::Future,
   os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
   pin::Pin,
-  rc::Rc,
-  sync::{Arc, LazyLock, Mutex, OnceLock, RwLock},
+  sync::{Arc, LazyLock, Mutex, OnceLock},
   task::{Poll, Waker},
   time::Instant,
 };
@@ -608,10 +607,7 @@ pub(super) fn select2_noresult<F1: Future + Unpin, F2: Future + Unpin>(f1: F1, f
     }
   }
 
-  Select2Future {
-    f1: f1,
-    f2: f2,
-  }
+  Select2Future { f1: f1, f2: f2 }
 }
 
 // Join
@@ -776,7 +772,7 @@ mod sleep {
 
   impl PartialOrd for InstantAndWaker {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-      Some(other.0.cmp(&self.0))
+      Some(self.cmp(other))
     }
   }
 

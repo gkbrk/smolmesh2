@@ -1,4 +1,4 @@
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::{Hash, Hasher};
 
 pub(crate) struct SeenPackets {
   hashset: rustc_hash::FxHashSet<u64>,

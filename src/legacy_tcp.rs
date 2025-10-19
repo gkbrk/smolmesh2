@@ -1,6 +1,6 @@
 use std::os::fd::AsRawFd;
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 
 use crate::leo_async::{self, ArcFd};
 use crate::{DSSResult, all_senders, gimli, info, log};

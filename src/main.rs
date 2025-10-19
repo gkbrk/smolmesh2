@@ -1,12 +1,9 @@
 #[macro_use]
 extern crate lazy_static;
 
-use std::{
-  collections::{HashSet, VecDeque},
-  io::Write,
-};
+use std::collections::{HashSet, VecDeque};
 
-use bytes::{BufMut, Bytes, BytesMut, Buf};
+use bytes::{BufMut, Bytes, BytesMut};
 use leo_async::DSSResult;
 
 mod all_senders;
