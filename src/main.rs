@@ -180,10 +180,10 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
       }
     }
 
-    if seen_packets.contains(&data) {
+    if seen_packets.add(&data) {
       continue;
     }
-    seen_packets.add(&data);
+
     let orig_data = data.clone();
 
     let cmd = &data[8];

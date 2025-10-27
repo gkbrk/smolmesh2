@@ -1,7 +1,31 @@
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasher, Hash, Hasher};
+
+struct IdentityHasher(u64);
+
+impl Hasher for IdentityHasher {
+  fn finish(&self) -> u64 {
+    self.0
+  }
+
+  fn write(&mut self, _bytes: &[u8]) {
+    unreachable!()
+  }
+
+  fn write_u64(&mut self, i: u64) {
+    self.0 = i;
+  }
+}
+
+impl BuildHasher for IdentityHasher {
+  type Hasher = Self;
+
+  fn build_hasher(&self) -> Self::Hasher {
+    return IdentityHasher(0);
+  }
+}
 
 pub(crate) struct SeenPackets {
-  hashset: rustc_hash::FxHashSet<u64>,
+  hashset: std::collections::HashSet<u64, IdentityHasher>,
   deque: std::collections::VecDeque<u64>,
   n: usize,
 }
@@ -9,33 +33,38 @@ pub(crate) struct SeenPackets {
 impl SeenPackets {
   pub(crate) fn new(n: usize) -> Self {
     SeenPackets {
-      hashset: rustc_hash::FxHashSet::default(),
+      hashset: std::collections::HashSet::with_capacity_and_hasher(n, IdentityHasher(0)),
       deque: std::collections::VecDeque::with_capacity(n),
       n,
     }
   }
 
-  #[inline(always)]
-  fn get_hash(&self, packet: &[u8]) -> u64 {
-    let mut hasher = rustc_hash::FxHasher::default();
-    packet.hash(&mut hasher);
-    hasher.finish()
-  }
+  pub(crate) fn add(&mut self, packet: &[u8]) -> bool {
+    let hash = {
+      let mut hasher = rustc_hash::FxHasher::default();
+      packet.hash(&mut hasher);
+      hasher.finish()
+    };
 
-  pub(crate) fn add(&mut self, packet: &[u8]) {
-    let hash = self.get_hash(packet);
     if !self.hashset.contains(&hash) {
       self.hashset.insert(hash);
       self.deque.push_back(hash);
-      while self.deque.len() > self.n {
+      if self.deque.len() > self.n {
         let old_hash = self.deque.pop_front().unwrap();
         self.hashset.remove(&old_hash);
       }
+      false
+    } else {
+      true
     }
   }
 
   pub(crate) fn contains(&self, packet: &[u8]) -> bool {
-    let hash = self.get_hash(packet);
+    let hash = {
+      let mut hasher = rustc_hash::FxHasher::default();
+      packet.hash(&mut hasher);
+      hasher.finish()
+    };
     self.hashset.contains(&hash)
   }
 }
