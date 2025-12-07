@@ -97,6 +97,9 @@ impl TunInterface {
     let read_fd = self.fd.dup().unwrap();
     let write_fd = self.fd.dup().unwrap();
 
+    Self::make_nonblocking(read_fd.as_raw_fd());
+    Self::make_nonblocking(write_fd.as_raw_fd());
+
     // tun -> network
     {
       leo_async::spawn(async move {
@@ -161,7 +164,7 @@ impl TunInterface {
             // On macOS, we need to prepend the 4-byte protocol family header
             // Determine protocol from IP version
             let ip_version = (packet[0] & 0b11110000) >> 4;
-            
+
             // Protocol family: 2 = AF_INET (IPv4), 30 = AF_INET6 (IPv6) on macOS
             let proto_family: [u8; 4] = match ip_version {
               4 => [0x00, 0x00, 0x00, 0x02], // AF_INET in network byte order

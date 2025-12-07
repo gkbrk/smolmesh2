@@ -273,7 +273,8 @@ fn run_forever(task_receiver: Arc<crossbeam::queue::SegQueue<Arc<Task>>>) {
         task_set.insert(Arc::as_ptr(&task), task);
       } else {
         if task_set.is_empty() {
-          std::thread::sleep(std::time::Duration::from_millis(1));
+          fd_poller::poll_and_wake(1).unwrap();
+          // std::thread::sleep(std::time::Duration::from_millis(1));
           continue;
         }
         break;
@@ -300,8 +301,6 @@ fn run_forever(task_receiver: Arc<crossbeam::queue::SegQueue<Arc<Task>>>) {
       }
     }
     task_set.clear();
-
-    fd_poller::poll_and_wake().unwrap();
   }
 }
 
@@ -676,7 +675,6 @@ mod fd_poller {
   use std::{
     collections::HashMap,
     os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd},
-    task::Waker,
   };
 
   use nix::poll::{PollFd, PollFlags, PollTimeout};
@@ -689,7 +687,7 @@ mod fd_poller {
     Write,
   }
 
-  pub fn poll_and_wake() -> DSSResult<()> {
+  pub fn poll_and_wake(timeout_ms: i32) -> DSSResult<()> {
     if POLL_REGISTER.is_empty() {
       return Ok(());
     }
@@ -723,7 +721,8 @@ mod fd_poller {
       ));
     }
 
-    let ready_count = nix::poll::poll(&mut fds, PollTimeout::try_from(100i32).unwrap())?;
+    crate::trace!("Polling {} fds", fds.len());
+    let ready_count = nix::poll::poll(&mut fds, PollTimeout::try_from(timeout_ms).unwrap())?;
     crate::trace!("poll() returned {} ready fds out of {}", ready_count, fds.len());
 
     for poll_fd in fds.iter() {

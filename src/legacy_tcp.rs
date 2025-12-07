@@ -174,6 +174,7 @@ async fn connect_impl(
   let addr: std::net::SocketAddr = format!("{}:{}", host, port).parse()?;
   let sock = connect_timeout(&addr, std::time::Duration::from_secs(5)).await?;
   crate::log!("Connected to {:?}", addr);
+  leo_async::socket::set_nodelay(&sock)?;
 
   let read_sock = sock.dup()?;
   let write_sock = sock.dup()?;
