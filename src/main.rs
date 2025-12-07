@@ -14,6 +14,8 @@ mod leo_async;
 #[cfg(target_os = "linux")]
 mod linux_tuntap;
 mod log;
+#[cfg(target_os = "macos")]
+mod mac_tuntap;
 mod raw_speck;
 mod rng;
 mod seen_packets;
@@ -132,6 +134,28 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
   if let Some(true) = config["linux_tuntap"].as_bool() {
     let interface_name = "smolmesh1";
     let tun = linux_tuntap::TunInterface::open(interface_name);
+    tun.bring_interface_up().await;
+    tun.set_ip6(&node_ip, 128).await;
+
+    // Handle IPv4 addresses
+    for addr in config["ipv4_addresses"].members() {
+      let addr = addr.as_str().unwrap();
+      let addr = addr.split(".").map(|x| x.parse::<u8>().unwrap()).collect::<Vec<u8>>();
+      let addr = crate::ip_addr::IpAddr::V4(addr[0], addr[1], addr[2], addr[3]);
+      tun.set_ipv4(&addr)
+    }
+
+    let _tun_sender = tun.run();
+    tun_sender.replace(_tun_sender);
+
+    let _route_adder = tun.route_creator();
+    route_adder.replace(_route_adder);
+  }
+
+  #[cfg(target_os = "macos")]
+  if let Some(true) = config["macos_tuntap"].as_bool() {
+    let interface_name = config["macos_interface_name"].as_str().unwrap_or("utun7");
+    let tun = mac_tuntap::TunInterface::open(interface_name);
     tun.bring_interface_up().await;
     tun.set_ip6(&node_ip, 128).await;
 
