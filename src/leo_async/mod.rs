@@ -1,5 +1,5 @@
 use std::{
-  collections::{HashMap},
+  collections::HashMap,
   future::Future,
   os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
   pin::Pin,
@@ -109,7 +109,8 @@ impl std::task::Wake for Task {
 
 static TASK_SENDER: OnceLock<Arc<crossbeam::queue::SegQueue<Arc<Task>>>> = OnceLock::new();
 
-static EPOLL_REGISTER: LazyLock<mpsc::Sender<(RawFd, epoll::PollType, Waker)>> = LazyLock::new(epoll::epoll_task);
+static POLL_REGISTER: LazyLock<crossbeam::queue::SegQueue<(RawFd, fd_poller::PollType, Waker)>> =
+  LazyLock::new(|| crossbeam::queue::SegQueue::new());
 
 static SLEEP_REGISTER: LazyLock<std::sync::mpsc::Sender<(Instant, Waker)>> = LazyLock::new(|| {
   let (sender, receiver) = std::sync::mpsc::channel();
@@ -126,9 +127,7 @@ pub(super) fn read_fd<'a>(fd: &'a ArcFd, buf: &'a mut [u8]) -> impl Future<Outpu
   std::future::poll_fn(move |cx| match nix::unistd::read(fd, buf) {
     Ok(n) => Poll::Ready(Ok(n)),
     Err(nix::errno::Errno::EAGAIN) => {
-      EPOLL_REGISTER
-        .send((fd.as_raw_fd(), epoll::PollType::Read, cx.waker().clone()))
-        .unwrap();
+      POLL_REGISTER.push((fd.as_raw_fd(), fd_poller::PollType::Read, cx.waker().clone()));
       Poll::Pending
     }
     Err(e) => Poll::Ready(Err(e.into())),
@@ -139,9 +138,7 @@ pub(super) fn write_fd<'a>(fd: &'a ArcFd, buf: &'a [u8]) -> impl Future<Output =
   std::future::poll_fn(move |cx| match nix::unistd::write(fd, buf) {
     Ok(n) => Poll::Ready(Ok(n)),
     Err(nix::errno::Errno::EAGAIN) => {
-      EPOLL_REGISTER
-        .send((fd.as_raw_fd(), epoll::PollType::Write, cx.waker().clone()))
-        .unwrap();
+      POLL_REGISTER.push((fd.as_raw_fd(), fd_poller::PollType::Write, cx.waker().clone()));
       Poll::Pending
     }
     Err(e) => Poll::Ready(Err(e.into())),
@@ -172,9 +169,7 @@ pub(super) fn fd_wait_readable(fd: &ArcFd) -> impl Future<Output = DSSResult<()>
       return Poll::Ready(Ok(()));
     }
 
-    EPOLL_REGISTER
-      .send((fd.as_raw_fd(), epoll::PollType::Read, cx.waker().clone()))
-      .unwrap();
+    POLL_REGISTER.push((fd.as_raw_fd(), fd_poller::PollType::Read, cx.waker().clone()));
 
     Poll::Pending
   })
@@ -186,9 +181,7 @@ pub(super) fn fd_wait_writable(fd: &ArcFd) -> impl Future<Output = DSSResult<()>
       return Poll::Ready(Ok(()));
     }
 
-    EPOLL_REGISTER
-      .send((fd.as_raw_fd(), epoll::PollType::Write, cx.waker().clone()))
-      .unwrap();
+    POLL_REGISTER.push((fd.as_raw_fd(), fd_poller::PollType::Write, cx.waker().clone()));
 
     Poll::Pending
   })
@@ -307,6 +300,8 @@ fn run_forever(task_receiver: Arc<crossbeam::queue::SegQueue<Arc<Task>>>) {
       }
     }
     task_set.clear();
+
+    fd_poller::poll_and_wake().unwrap();
   }
 }
 
@@ -328,7 +323,7 @@ pub(super) fn sleep_seconds(seconds: impl Into<f64>) -> impl Future<Output = ()>
 }
 
 fn get_errno() -> i32 {
-  unsafe { (*libc::__errno_location()) as i32 }
+  nix::errno::Errno::last_raw() as i32
 }
 
 pub(super) mod socket {
@@ -352,7 +347,12 @@ pub(super) mod socket {
     };
 
     let sockaddr = libc::sockaddr_in {
+      #[cfg(target_os = "macos")]
+      sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
+      #[cfg(target_os = "linux")]
       sin_family: libc::AF_INET as u16,
+      #[cfg(target_os = "macos")]
+      sin_family: libc::AF_INET as u8,
       sin_port: addr.port().to_be(),
       sin_addr: libc::in_addr {
         s_addr: addr.ip().to_bits().to_be(),
@@ -672,88 +672,80 @@ where
   }
 }
 
-mod epoll {
+mod fd_poller {
   use std::{
     collections::HashMap,
-    os::fd::{AsRawFd, BorrowedFd, RawFd},
-    sync::{Arc, Mutex},
+    os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd},
     task::Waker,
   };
 
-  use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags, EpollTimeout};
+  use nix::poll::{PollFd, PollFlags, PollTimeout};
 
-  #[derive(PartialEq, Eq, Hash, Debug)]
+  use crate::{DSSResult, leo_async::POLL_REGISTER};
+
+  #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
   pub enum PollType {
     Read,
     Write,
   }
 
-  type WakerHashMap = HashMap<i32, Waker>;
-
-  pub fn epoll_task() -> super::mpsc::Sender<(RawFd, PollType, Waker)> {
-    let (sender, receiver) = super::mpsc::channel();
-    let epoll = Arc::new(Epoll::new(EpollCreateFlags::empty()).unwrap());
-    let waker_hashmap: Arc<Mutex<WakerHashMap>> = Arc::new(Mutex::new(HashMap::new()));
-
-    // Registerer
-    super::spawn(epoll_register_task(epoll.clone(), waker_hashmap.clone(), receiver));
-
-    // Waker
-    std::thread::spawn(move || epoll_waker_task(epoll.clone(), waker_hashmap.clone()));
-
-    sender
-  }
-
-  fn epoll_waker_task(epoll: Arc<Epoll>, waker_hashmap: Arc<Mutex<WakerHashMap>>) {
-    loop {
-      let mut events = [EpollEvent::empty(); 128];
-      let epoll = epoll.clone();
-
-      let n = epoll.wait(&mut events, EpollTimeout::NONE).unwrap();
-
-      let mut waker_hashmap = waker_hashmap.lock().unwrap();
-
-      for event in events.iter().take(n) {
-        let fd = event.data() as i32;
-
-        if let Some(waker) = waker_hashmap.remove(&fd) {
-          waker.wake();
-        }
-      }
+  pub fn poll_and_wake() -> DSSResult<()> {
+    if POLL_REGISTER.is_empty() {
+      return Ok(());
     }
-  }
 
-  async fn epoll_register_task(
-    epoll: Arc<Epoll>,
-    waker_hashmap: Arc<Mutex<WakerHashMap>>,
-    receiver: super::mpsc::Receiver<(RawFd, PollType, Waker)>,
-  ) {
-    while let Some((fd, polltype, waker)) = receiver.recv().await {
-      let flags = match polltype {
-        PollType::Read => EpollFlags::EPOLLIN | EpollFlags::EPOLLONESHOT,
-        PollType::Write => EpollFlags::EPOLLOUT | EpollFlags::EPOLLONESHOT,
-      };
+    let mut poll_state: HashMap<RawFd, Vec<(PollType, usize)>> = HashMap::new();
+    let mut waker_store = slab::Slab::new();
 
-      let raw_fd = fd.as_raw_fd();
-      let borrowed_fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
-      let _ = waker_hashmap.lock().unwrap().insert(raw_fd, waker);
+    while let Some((fd, polltype, waker)) = POLL_REGISTER.pop() {
+      let waker_id = waker_store.insert(waker);
+      poll_state.entry(fd).or_default().push((polltype, waker_id));
+    }
 
-      let mut ev = EpollEvent::new(flags, raw_fd as u64);
+    let mut fds: Vec<PollFd> = Vec::new();
 
-      match epoll.modify(borrowed_fd, &mut ev) {
-        Ok(_) => {}
-        // If the file descriptor is not found in the epoll instance, add it instead of modifying.
-        Err(nix::errno::Errno::ENOENT) => match epoll.add(borrowed_fd, ev) {
-          Ok(_) => {}
-          Err(e) => {
-            crate::warn!("epoll add failed: {:?}", e);
-          }
+    for (fd, wakers) in poll_state.iter() {
+      let (has_read, has_write) = wakers.iter().fold((false, false), |(has_read, has_write), (polltype, _)| {
+        match polltype {
+          PollType::Read => (true, has_write),
+          PollType::Write => (has_read, true),
+        }
+      });
+
+      fds.push(PollFd::new(
+        unsafe { BorrowedFd::borrow_raw(*fd) },
+        match (has_read, has_write) {
+          (true, true) => PollFlags::POLLIN | PollFlags::POLLOUT,
+          (true, false) => PollFlags::POLLIN,
+          (false, true) => PollFlags::POLLOUT,
+          (false, false) => unreachable!(),
         },
-        Err(e) => {
-          crate::warn!("epoll modify failed: {:?}", e);
+      ));
+    }
+
+    let ready_count = nix::poll::poll(&mut fds, PollTimeout::try_from(100i32).unwrap())?;
+    crate::trace!("poll() returned {} ready fds out of {}", ready_count, fds.len());
+
+    for poll_fd in fds.iter() {
+      let revents = poll_fd.revents().ok_or("Cannot read revents")?;
+
+      if !revents.is_empty() {
+        for (_, waker_id) in poll_state.get(&poll_fd.as_fd().as_raw_fd()).unwrap().iter() {
+          waker_store.get(*waker_id).ok_or("Waker not found")?.wake_by_ref();
         }
+        poll_state.remove(&poll_fd.as_fd().as_raw_fd());
       }
     }
+
+    // Re-register wakers that were not ready
+    for (fd, wakers) in poll_state.iter() {
+      for (polltype, waker_id) in wakers.iter() {
+        let waker = waker_store.get(*waker_id).ok_or("Waker not found")?.clone();
+        POLL_REGISTER.push((*fd, *polltype, waker));
+      }
+    }
+
+    Ok(())
   }
 }
 

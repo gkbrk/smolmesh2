@@ -11,7 +11,7 @@ mod gimli;
 mod ip_addr;
 mod legacy_tcp;
 mod leo_async;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod linux_tuntap;
 mod log;
 mod raw_speck;
@@ -128,7 +128,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
   let mut tun_sender: Option<leo_async::mpsc::Sender<Bytes>> = None;
   let mut route_adder: Option<leo_async::mpsc::Sender<ip_addr::IpAddr>> = None;
 
-  #[cfg(unix)]
+  #[cfg(target_os = "linux")]
   if let Some(true) = config["linux_tuntap"].as_bool() {
     let interface_name = "smolmesh1";
     let tun = linux_tuntap::TunInterface::open(interface_name);
