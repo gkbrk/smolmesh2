@@ -703,12 +703,12 @@ mod fd_poller {
     let mut fds: Vec<PollFd> = Vec::new();
 
     for (fd, wakers) in poll_state.iter() {
-      let (has_read, has_write) = wakers.iter().fold((false, false), |(has_read, has_write), (polltype, _)| {
-        match polltype {
+      let (has_read, has_write) = wakers
+        .iter()
+        .fold((false, false), |(has_read, has_write), (polltype, _)| match polltype {
           PollType::Read => (true, has_write),
           PollType::Write => (has_read, true),
-        }
-      });
+        });
 
       fds.push(PollFd::new(
         unsafe { BorrowedFd::borrow_raw(*fd) },
