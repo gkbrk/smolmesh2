@@ -807,10 +807,6 @@ mod fd_poller {
   }
 
   pub fn poll_and_wake(cache: &mut PollCache, timeout_ms: i32) -> DSSResult<()> {
-    if POLL_REGISTER.is_empty() {
-      return Ok(());
-    }
-
     cache.clear();
 
     while let Some((fd, polltype, waker)) = POLL_REGISTER.pop() {
