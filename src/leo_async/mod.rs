@@ -267,14 +267,15 @@ where
 
 fn run_forever(task_receiver: Arc<crossbeam::queue::SegQueue<Arc<Task>>>) {
   let mut task_set = HashMap::new();
+  let mut poll_cache = fd_poller::PollCache::new();
+
   loop {
     loop {
       if let Some(task) = task_receiver.pop() {
         task_set.insert(Arc::as_ptr(&task), task);
       } else {
         if task_set.is_empty() {
-          fd_poller::poll_and_wake(1).unwrap();
-          // std::thread::sleep(std::time::Duration::from_millis(1));
+          fd_poller::poll_and_wake(&mut poll_cache, 1).unwrap();
           continue;
         }
         break;
@@ -733,7 +734,7 @@ mod sleep_storage {
 mod fd_poller {
   use std::{
     collections::HashMap,
-    os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd},
+    os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd}, task::Waker,
   };
 
   use nix::poll::{PollFd, PollFlags, PollTimeout};
@@ -746,22 +747,41 @@ mod fd_poller {
     Write,
   }
 
-  pub fn poll_and_wake(timeout_ms: i32) -> DSSResult<()> {
+  pub struct PollCache<'a> {
+    poll_state: HashMap<RawFd, Vec<(PollType, usize)>>,
+    waker_store: slab::Slab<Waker>,
+    fds: Vec<PollFd<'a>>,
+  }
+
+  impl<'a> PollCache<'a> {
+    pub fn new() -> Self {
+      Self {
+        poll_state: HashMap::new(),
+        waker_store: slab::Slab::new(),
+        fds: Vec::new(),
+      }
+    }
+
+    pub fn clear(&mut self) {
+      self.poll_state.clear();
+      self.waker_store.clear();
+      self.fds.clear();
+    }
+  }
+
+  pub fn poll_and_wake(cache: &mut PollCache, timeout_ms: i32) -> DSSResult<()> {
     if POLL_REGISTER.is_empty() {
       return Ok(());
     }
 
-    let mut poll_state: HashMap<RawFd, Vec<(PollType, usize)>> = HashMap::new();
-    let mut waker_store = slab::Slab::new();
+    cache.clear();
 
     while let Some((fd, polltype, waker)) = POLL_REGISTER.pop() {
-      let waker_id = waker_store.insert(waker);
-      poll_state.entry(fd).or_default().push((polltype, waker_id));
+      let waker_id = cache.waker_store.insert(waker);
+      cache.poll_state.entry(fd).or_default().push((polltype, waker_id));
     }
 
-    let mut fds: Vec<PollFd> = Vec::new();
-
-    for (fd, wakers) in poll_state.iter() {
+    for (fd, wakers) in cache.poll_state.iter() {
       let (has_read, has_write) = wakers
         .iter()
         .fold((false, false), |(has_read, has_write), (polltype, _)| match polltype {
@@ -769,7 +789,7 @@ mod fd_poller {
           PollType::Write => (has_read, true),
         });
 
-      fds.push(PollFd::new(
+      cache.fds.push(PollFd::new(
         unsafe { BorrowedFd::borrow_raw(*fd) },
         match (has_read, has_write) {
           (true, true) => PollFlags::POLLIN | PollFlags::POLLOUT,
@@ -780,25 +800,25 @@ mod fd_poller {
       ));
     }
 
-    crate::trace!("Polling {} fds", fds.len());
-    let ready_count = nix::poll::poll(&mut fds, PollTimeout::try_from(timeout_ms).unwrap())?;
-    crate::trace!("poll() returned {} ready fds out of {}", ready_count, fds.len());
+    crate::trace!("Polling {} fds", cache.fds.len());
+    let ready_count = nix::poll::poll(&mut cache.fds, PollTimeout::try_from(timeout_ms).unwrap())?;
+    crate::trace!("poll() returned {} ready fds out of {}", ready_count, cache.fds.len());
 
-    for poll_fd in fds.iter() {
+    for poll_fd in cache.fds.iter() {
       let revents = poll_fd.revents().ok_or("Cannot read revents")?;
 
       if !revents.is_empty() {
-        for (_, waker_id) in poll_state.get(&poll_fd.as_fd().as_raw_fd()).unwrap().iter() {
-          waker_store.get(*waker_id).ok_or("Waker not found")?.wake_by_ref();
+        for (_, waker_id) in cache.poll_state.get(&poll_fd.as_fd().as_raw_fd()).unwrap().iter() {
+          cache.waker_store.get(*waker_id).ok_or("Waker not found")?.wake_by_ref();
         }
-        poll_state.remove(&poll_fd.as_fd().as_raw_fd());
+        cache.poll_state.remove(&poll_fd.as_fd().as_raw_fd());
       }
     }
 
     // Re-register wakers that were not ready
-    for (fd, wakers) in poll_state.iter() {
+    for (fd, wakers) in cache.poll_state.iter() {
       for (polltype, waker_id) in wakers.iter() {
-        let waker = waker_store.get(*waker_id).ok_or("Waker not found")?.clone();
+        let waker = cache.waker_store.get(*waker_id).ok_or("Waker not found")?.clone();
         POLL_REGISTER.push((*fd, *polltype, waker));
       }
     }
