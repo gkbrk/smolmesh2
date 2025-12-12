@@ -671,6 +671,65 @@ where
   }
 }
 
+mod sleep_storage {
+  use std::{collections::BinaryHeap, task::Waker, time::Instant};
+
+  struct InstantAndWaker(Instant, Waker);
+
+  impl PartialEq for InstantAndWaker {
+    fn eq(&self, other: &Self) -> bool {
+      self.0 == other.0
+    }
+  }
+
+  impl Eq for InstantAndWaker {}
+
+  impl PartialOrd for InstantAndWaker {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+      Some(self.cmp(other))
+    }
+  }
+
+  impl Ord for InstantAndWaker {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+      other.0.cmp(&self.0)
+    }
+  }
+
+  pub(crate) struct SleepStore {
+    sleep_queue: BinaryHeap<InstantAndWaker>,
+  }
+
+  impl SleepStore {
+    pub fn new() -> Self {
+      Self {
+        sleep_queue: BinaryHeap::new(),
+      }
+    }
+
+    pub fn add(&mut self, instant: Instant, waker: Waker) {
+      self.sleep_queue.push(InstantAndWaker(instant, waker));
+    }
+
+    pub fn wake_all_ready(&mut self) {
+      let now = Instant::now();
+
+      while let Some(InstantAndWaker(instant, waker)) = self.sleep_queue.peek() {
+        if instant <= &now {
+          waker.wake_by_ref();
+          self.sleep_queue.pop().unwrap();
+        } else {
+          break;
+        }
+      }
+    }
+
+    pub fn get_next_wakeup(&self) -> Option<Instant> {
+      self.sleep_queue.peek().map(|x| x.0)
+    }
+  }
+}
+
 mod fd_poller {
   use std::{
     collections::HashMap,
@@ -749,54 +808,27 @@ mod fd_poller {
 }
 
 mod sleep {
-  use std::{collections::BinaryHeap, task::Waker, time::Instant};
+  use std::{task::Waker, time::Instant};
 
-  struct InstantAndWaker(Instant, Waker);
-
-  impl PartialEq for InstantAndWaker {
-    fn eq(&self, other: &Self) -> bool {
-      self.0 == other.0
-    }
-  }
-
-  impl Eq for InstantAndWaker {}
-
-  impl PartialOrd for InstantAndWaker {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-      Some(self.cmp(other))
-    }
-  }
-
-  impl Ord for InstantAndWaker {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-      other.0.cmp(&self.0)
-    }
-  }
+  use crate::leo_async::sleep_storage;
 
   pub(super) fn sleep_task(recv: std::sync::mpsc::Receiver<(Instant, Waker)>) {
-    let mut sleep_queue: BinaryHeap<InstantAndWaker> = BinaryHeap::new();
+    let mut sleep_store = sleep_storage::SleepStore::new();
 
     loop {
       while let Ok((instant, waker)) = recv.try_recv() {
-        sleep_queue.push(InstantAndWaker(instant, waker));
+        sleep_store.add(instant, waker);
       }
+
+      sleep_store.wake_all_ready();
 
       let now = Instant::now();
-      while let Some(InstantAndWaker(instant, _)) = sleep_queue.peek() {
-        if instant <= &now {
-          if let Some(InstantAndWaker(_, waker)) = sleep_queue.pop() {
-            waker.wake_by_ref();
-          }
-        } else {
-          break;
-        }
-      }
 
-      if let Some(InstantAndWaker(instant, _)) = sleep_queue.peek() {
-        let timeout = *instant - now;
+      if let Some(instant) = sleep_store.get_next_wakeup() {
+        let timeout = instant - now;
         match recv.recv_timeout(timeout) {
           Ok((instant, waker)) => {
-            sleep_queue.push(InstantAndWaker(instant, waker));
+            sleep_store.add(instant, waker);
             continue;
           }
           Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
@@ -805,7 +837,7 @@ mod sleep {
       }
 
       if let Ok((instant, waker)) = recv.recv() {
-        sleep_queue.push(InstantAndWaker(instant, waker));
+        sleep_store.add(instant, waker);
       }
     }
   }
