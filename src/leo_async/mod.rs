@@ -310,21 +310,46 @@ fn run_forever(task_receiver: Arc<crossbeam::queue::SegQueue<Arc<Task>>>) {
   }
 }
 
+struct SleepFuture {
+  target: std::time::Instant,
+  registered_waker: Option<Waker>,
+}
+
+impl Future for SleepFuture {
+  type Output = ();
+
+  fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context) -> std::task::Poll<Self::Output> {
+    let now = std::time::Instant::now();
+
+    if now >= self.target {
+      return std::task::Poll::Ready(());
+    }
+
+    let this = self.get_mut();
+
+    // Check if we already have a registered waker that will wake the current waker
+    if let Some(registered_waker) = &this.registered_waker {
+      if registered_waker.will_wake(cx.waker()) {
+        return Poll::Pending;
+      }
+    }
+
+    // Register the waker for sleep
+    this.registered_waker = Some(cx.waker().clone());
+    SLEEP_REGISTER.push((this.target, cx.waker().clone()));
+
+    Poll::Pending
+  }
+}
+
 pub(super) fn sleep_seconds(seconds: impl Into<f64>) -> impl Future<Output = ()> {
   let seconds = seconds.into();
   let target = std::time::Instant::now() + std::time::Duration::from_secs_f64(seconds);
 
-  std::future::poll_fn(move |cx| {
-    let now = std::time::Instant::now();
-
-    if now >= target {
-      Poll::Ready(())
-    } else {
-      // Register a sleep waker
-      SLEEP_REGISTER.push((target, cx.waker().clone()));
-      Poll::Pending
-    }
-  })
+  SleepFuture {
+    target,
+    registered_waker: None,
+  }
 }
 
 fn get_errno() -> i32 {
@@ -542,6 +567,7 @@ where
 {
   future: F,
   timeout_at: std::time::Instant,
+  registered_waker: Option<Waker>,
 }
 
 pub(super) fn timeout_future<F, T>(future: F, timeout: std::time::Duration) -> TimeoutFuture<F, T>
@@ -551,6 +577,7 @@ where
   TimeoutFuture {
     future,
     timeout_at: std::time::Instant::now() + timeout,
+    registered_waker: None,
   }
 }
 
@@ -577,9 +604,13 @@ where
     match poll_res {
       Poll::Ready(output) => Poll::Ready(Ok(output)),
       Poll::Pending => {
+        if let Some(registered_waker) = &this.registered_waker && registered_waker.will_wake(cx.waker()) {
+          return Poll::Pending;
+        }
+
         crate::trace!("Registering a timeout waker");
-        let waker = cx.waker().clone();
-        SLEEP_REGISTER.push((timeout_at, waker));
+        this.registered_waker = Some(cx.waker().clone());
+        SLEEP_REGISTER.push((timeout_at, cx.waker().clone()));
         Poll::Pending
       }
     }
