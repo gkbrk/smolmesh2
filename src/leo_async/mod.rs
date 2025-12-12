@@ -112,16 +112,8 @@ static TASK_SENDER: OnceLock<Arc<crossbeam::queue::SegQueue<Arc<Task>>>> = OnceL
 static POLL_REGISTER: LazyLock<crossbeam::queue::SegQueue<(RawFd, fd_poller::PollType, Waker)>> =
   LazyLock::new(|| crossbeam::queue::SegQueue::new());
 
-static SLEEP_REGISTER: LazyLock<std::sync::mpsc::Sender<(Instant, Waker)>> = LazyLock::new(|| {
-  let (sender, receiver) = std::sync::mpsc::channel();
-
-  std::thread::Builder::new()
-    .name("sleep-task".to_string())
-    .spawn(|| sleep::sleep_task(receiver))
-    .expect("Failed to spawn sleep task");
-
-  sender
-});
+static SLEEP_REGISTER: LazyLock<crossbeam::queue::SegQueue<(Instant, Waker)>> =
+  LazyLock::new(|| crossbeam::queue::SegQueue::new());
 
 pub(super) fn read_fd<'a>(fd: &'a ArcFd, buf: &'a mut [u8]) -> impl Future<Output = DSSResult<usize>> + 'a {
   std::future::poll_fn(move |cx| match nix::unistd::read(fd, buf) {
@@ -268,18 +260,32 @@ where
 fn run_forever(task_receiver: Arc<crossbeam::queue::SegQueue<Arc<Task>>>) {
   let mut task_set = HashMap::new();
   let mut poll_cache = fd_poller::PollCache::new();
+  let mut sleep_store = sleep_storage::SleepStore::new();
 
   loop {
-    loop {
-      if let Some(task) = task_receiver.pop() {
-        task_set.insert(Arc::as_ptr(&task), task);
-      } else {
-        if task_set.is_empty() {
-          fd_poller::poll_and_wake(&mut poll_cache, 1).unwrap();
-          continue;
+    while let Some((instant, waker)) = SLEEP_REGISTER.pop() {
+      sleep_store.add(instant, waker);
+    }
+
+    sleep_store.wake_all_ready();
+
+    while let Some(task) = task_receiver.pop() {
+      task_set.insert(Arc::as_ptr(&task), task);
+    }
+
+    if task_set.is_empty() {
+      let now = Instant::now();
+      let sleep_ms = match sleep_store.get_next_wakeup() {
+        Some(next_wakeup) if next_wakeup > now => {
+          let sleep_time = next_wakeup - now;
+          sleep_time.as_millis() as i32
         }
-        break;
-      }
+        // Normally this can be much longer, or even infinite. But we want to
+        // move things along in case someone writes a misbehaving future.
+        _ => std::time::Duration::from_secs(1).as_millis() as i32,
+      };
+      fd_poller::poll_and_wake(&mut poll_cache, sleep_ms).unwrap();
+      continue;
     }
 
     crate::trace!("Running {} tasks", task_set.len());
@@ -301,7 +307,6 @@ fn run_forever(task_receiver: Arc<crossbeam::queue::SegQueue<Arc<Task>>>) {
         error!("Task with no future");
       }
     }
-    task_set.clear();
   }
 }
 
@@ -316,7 +321,7 @@ pub(super) fn sleep_seconds(seconds: impl Into<f64>) -> impl Future<Output = ()>
       Poll::Ready(())
     } else {
       // Register a sleep waker
-      SLEEP_REGISTER.send((target, cx.waker().clone())).unwrap();
+      SLEEP_REGISTER.push((target, cx.waker().clone()));
       Poll::Pending
     }
   })
@@ -574,7 +579,7 @@ where
       Poll::Pending => {
         crate::trace!("Registering a timeout waker");
         let waker = cx.waker().clone();
-        SLEEP_REGISTER.send((timeout_at, waker)).unwrap();
+        SLEEP_REGISTER.push((timeout_at, waker));
         Poll::Pending
       }
     }
@@ -734,7 +739,8 @@ mod sleep_storage {
 mod fd_poller {
   use std::{
     collections::HashMap,
-    os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd}, task::Waker,
+    os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd},
+    task::Waker,
   };
 
   use nix::poll::{PollFd, PollFlags, PollTimeout};
@@ -824,42 +830,6 @@ mod fd_poller {
     }
 
     Ok(())
-  }
-}
-
-mod sleep {
-  use std::{task::Waker, time::Instant};
-
-  use crate::leo_async::sleep_storage;
-
-  pub(super) fn sleep_task(recv: std::sync::mpsc::Receiver<(Instant, Waker)>) {
-    let mut sleep_store = sleep_storage::SleepStore::new();
-
-    loop {
-      while let Ok((instant, waker)) = recv.try_recv() {
-        sleep_store.add(instant, waker);
-      }
-
-      sleep_store.wake_all_ready();
-
-      let now = Instant::now();
-
-      if let Some(instant) = sleep_store.get_next_wakeup() {
-        let timeout = instant - now;
-        match recv.recv_timeout(timeout) {
-          Ok((instant, waker)) => {
-            sleep_store.add(instant, waker);
-            continue;
-          }
-          Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-          Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-      }
-
-      if let Ok((instant, waker)) = recv.recv() {
-        sleep_store.add(instant, waker);
-      }
-    }
   }
 }
 
