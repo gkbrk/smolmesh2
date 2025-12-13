@@ -46,20 +46,6 @@ impl TunInterface {
     }
   }
 
-  pub(crate) async fn bring_interface_up(&self) {
-    let name = self.name.clone();
-    leo_async::fn_thread_future(move || {
-      let mut cmd = std::process::Command::new("ifconfig");
-      cmd.arg(&name);
-      cmd.arg("up");
-      
-      if let Err(e) = cmd.spawn().and_then(|mut c| c.wait()) {
-        crate::warn!("Failed to bring interface up: {}", e);
-      }
-    })
-    .await;
-  }
-
   pub(crate) async fn set_ip6(&self, addr: &crate::ip_addr::IpAddr, prefix_len: u8) {
     let name = self.name.clone();
     let addr_str = format!("{}", addr);
@@ -76,21 +62,6 @@ impl TunInterface {
       }
     })
     .await;
-  }
-
-  pub(crate) fn set_ipv4(&self, addr: &crate::ip_addr::IpAddr) {
-    let name = self.name.clone();
-    let addr_str = format!("{}", addr);
-
-    // On macOS, use ifconfig to add IPv4 address
-    let cmd = format!("ifconfig {} inet {} {} alias", name, addr_str, addr_str);
-    let mut proc = std::process::Command::new("sh");
-    proc.arg("-c");
-    proc.arg(cmd);
-    
-    if let Err(e) = proc.spawn().and_then(|mut c| c.wait()) {
-      crate::warn!("Failed to set IPv4 address: {}", e);
-    }
   }
 
   pub(crate) fn run(&self) -> leo_async::mpsc::Sender<Bytes> {
