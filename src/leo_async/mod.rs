@@ -3,10 +3,15 @@ use std::{
   future::Future,
   os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
   pin::Pin,
-  sync::{Arc, LazyLock, Mutex, OnceLock},
-  task::{Poll, Waker},
+  sync::{
+    Arc, LazyLock, Mutex, OnceLock,
+    atomic::{AtomicBool, Ordering},
+  },
+  task::{Poll, Wake, Waker},
   time::Instant,
 };
+
+use futures::task;
 
 use crate::{error, trace};
 
@@ -121,20 +126,33 @@ pub(super) type DSSResult<T> = std::result::Result<T, Box<dyn std::error::Error 
 
 struct Task {
   future: Mutex<Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>>,
-  sender: Arc<crossbeam::queue::SegQueue<Arc<Task>>>,
+  // sender: crossbeam::queue::SegQueue<Arc<Task>>,
+  scheduled: std::sync::atomic::AtomicBool,
 }
 
 impl std::task::Wake for Task {
   fn wake(self: Arc<Self>) {
-    self.sender.clone().push(self);
+    if self
+      .scheduled
+      .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+      .is_ok()
+    {
+      TASK_SENDER.get().unwrap().push(self);
+    }
   }
 
   fn wake_by_ref(self: &Arc<Self>) {
-    self.sender.clone().push(self.clone());
+    if self
+      .scheduled
+      .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+      .is_ok()
+    {
+      TASK_SENDER.get().unwrap().push(self.clone());
+    }
   }
 }
 
-static TASK_SENDER: OnceLock<Arc<crossbeam::queue::SegQueue<Arc<Task>>>> = OnceLock::new();
+static TASK_SENDER: OnceLock<crossbeam::queue::SegQueue<Arc<Task>>> = OnceLock::new();
 
 static POLL_REGISTER: LazyLock<crossbeam::queue::SegQueue<(RawFd, fd_poller::PollType, Waker)>> =
   LazyLock::new(|| crossbeam::queue::SegQueue::new());
@@ -173,6 +191,10 @@ pub(super) fn write_fd<'a>(fd: &'a ArcFd, buf: &'a [u8]) -> impl Future<Output =
 }
 
 pub(super) fn fd_assert_nonblocking<F: AsRawFd>(f: &F) {
+  if !cfg!(debug_assertions) {
+    return;
+  }
+
   let fd = f.as_raw_fd();
   let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
   if flags == -1 {
@@ -238,7 +260,9 @@ where
 
   let task = Arc::new(Task {
     future: Mutex::new(Some(Box::pin(future))),
-    sender: sender.clone(),
+    // Scheduled needs to be true initially, because we're instantly pushing the
+    // task to the queue.
+    scheduled: AtomicBool::new(true),
   });
 
   sender.push(task);
@@ -249,20 +273,24 @@ where
   F: Future<Output = T> + Send + 'static,
   T: Send + 'static + std::fmt::Debug,
 {
-  let sender = Arc::new(crossbeam::queue::SegQueue::new());
-  TASK_SENDER.set(sender.clone()).unwrap();
+  let sender = crossbeam::queue::SegQueue::new();
+  TASK_SENDER.set(sender).unwrap();
 
-  let t = std::thread::spawn(move || run_forever(sender.clone()));
+  let result_receiver = {
+    let (result_sender, result_receiver) = std::sync::mpsc::channel();
 
-  let (result_sender, result_receiver) = std::sync::mpsc::channel();
+    spawn(async move {
+      let res = future.await;
+      result_sender.send(res).unwrap();
+    });
 
-  spawn(async move {
-    let res = future.await;
-    result_sender.send(res).unwrap();
-  });
+    result_receiver
+  };
+
+  run_forever();
+  crate::info!("run_forever finished");
 
   let res = result_receiver.recv().unwrap();
-  t.join().unwrap();
   res
 }
 
@@ -304,10 +332,10 @@ where
   pollfn
 }
 
-fn run_forever(task_receiver: Arc<crossbeam::queue::SegQueue<Arc<Task>>>) {
-  let mut task_set = HashMap::new();
+fn run_forever() {
   let mut poll_cache = fd_poller::PollCache::new();
   let mut sleep_store = sleep_storage::SleepStore::new();
+  let mut task_vec = Vec::new();
 
   loop {
     while let Some((instant, waker)) = SLEEP_REGISTER.pop() {
@@ -316,48 +344,43 @@ fn run_forever(task_receiver: Arc<crossbeam::queue::SegQueue<Arc<Task>>>) {
 
     sleep_store.wake_all_ready();
 
+    let task_receiver = TASK_SENDER.get().unwrap();
+
     while let Some(task) = task_receiver.pop() {
-      task_set.insert(Arc::as_ptr(&task), task);
+      task_vec.push(task);
     }
 
-    if task_set.is_empty() {
-      let now = Instant::now();
-      let sleep_ms = match sleep_store.get_next_wakeup() {
-        Some(next_wakeup) if next_wakeup > now => {
-          let sleep_time = next_wakeup - now;
-          sleep_time.as_millis() as i32
-        }
-        // Normally this can be much longer, or even infinite. But we want to
-        // move things along in case someone writes a misbehaving future.
-        _ => std::time::Duration::from_secs(1).as_millis() as i32,
-      };
-      fd_poller::poll_and_wake(&mut poll_cache, sleep_ms).unwrap();
-      continue;
-    }
+    crate::trace!("Running {} tasks", task_vec.len());
 
-    crate::trace!("Running {} tasks", task_set.len());
+    for task in task_vec.drain(..) {
+      // Allow the task to be scheduled again.
+      task.scheduled.store(false, Ordering::Release);
 
-    for (_, task) in task_set.drain() {
       let waker = std::task::Waker::from(task.clone());
       let context = &mut std::task::Context::from_waker(&waker);
 
       let mut future_slot = task.future.lock().unwrap();
 
       if let Some(mut future) = future_slot.take() {
-        let start_time = Instant::now();
         if future.as_mut().poll(context).is_pending() {
           // Not done, put it back
           *future_slot = Some(future);
         }
-        let end_time = Instant::now();
-        let duration = end_time - start_time;
-        if duration.as_millis() > 1 {
-          crate::warn!("Polling task took {:?}", duration);
-        }
       } else {
-        // This should never happen
-        error!("Task with no future");
+        crate::warn!("Task with no future");
       }
+    }
+
+    if task_receiver.is_empty() {
+      let now = Instant::now();
+      let sleep_ms = match sleep_store.get_next_wakeup() {
+        Some(next_wakeup) if next_wakeup > now => (next_wakeup - now).as_millis() as i32,
+        _ => std::time::Duration::from_secs(1).as_millis() as i32,
+      };
+      crate::trace!("Sleeping for {}ms", sleep_ms);
+      fd_poller::poll_and_wake(&mut poll_cache, sleep_ms).unwrap();
+    } else {
+      fd_poller::poll_and_wake(&mut poll_cache, 0).unwrap();
     }
   }
 }
