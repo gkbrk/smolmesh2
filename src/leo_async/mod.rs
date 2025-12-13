@@ -10,29 +10,6 @@ use std::{
 
 use crate::{error, trace};
 
-fn noisytimer(s: &'_ str, milliseconds: u64) -> impl Drop + '_ {
-  struct X<'a>(&'a str, std::time::Instant, std::time::Duration);
-
-  impl<'a> Drop for X<'a> {
-    fn drop(&mut self) {
-      let now = std::time::Instant::now();
-      let dur = now - self.1;
-
-      if dur > self.2 {
-        crate::warn!("NoisyTimer: {} took too long ({:?})", self.0, dur);
-      } else {
-        crate::trace!("NoisyTimer: {} took {:?}", self.0, dur);
-      }
-    }
-  }
-
-  X(
-    s,
-    std::time::Instant::now(),
-    std::time::Duration::from_millis(milliseconds),
-  )
-}
-
 pub(crate) struct ArcFd {
   fd: Arc<OwnedFd>,
 }
@@ -90,6 +67,56 @@ impl Clone for ArcFd {
   }
 }
 
+impl futures::AsyncRead for ArcFd {
+  fn poll_read(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut [u8]) -> Poll<std::io::Result<usize>> {
+    let this = self.get_mut();
+
+    fd_assert_nonblocking(this);
+
+    match nix::unistd::read(&this, buf) {
+      Ok(n) => Poll::Ready(Ok(n)),
+      Err(nix::errno::Errno::EAGAIN) => {
+        POLL_REGISTER.push((this.as_raw_fd(), fd_poller::PollType::Read, cx.waker().clone()));
+        Poll::Pending
+      }
+      Err(nix::errno::Errno::EINTR) => {
+        cx.waker().wake_by_ref();
+        Poll::Pending
+      }
+      Err(e) => Poll::Ready(Err(e.into())),
+    }
+  }
+}
+
+impl futures::AsyncWrite for ArcFd {
+  fn poll_write(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+    let this = self.get_mut();
+
+    fd_assert_nonblocking(this);
+
+    match nix::unistd::write(&this, buf) {
+      Ok(n) => Poll::Ready(Ok(n)),
+      Err(nix::errno::Errno::EAGAIN) => {
+        POLL_REGISTER.push((this.as_raw_fd(), fd_poller::PollType::Write, cx.waker().clone()));
+        Poll::Pending
+      }
+      Err(nix::errno::Errno::EINTR) => {
+        cx.waker().wake_by_ref();
+        Poll::Pending
+      }
+      Err(e) => Poll::Ready(Err(e.into())),
+    }
+  }
+
+  fn poll_flush(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<std::io::Result<()>> {
+    Poll::Ready(Ok(()))
+  }
+
+  fn poll_close(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<std::io::Result<()>> {
+    Poll::Ready(Ok(()))
+  }
+}
+
 pub(super) type DSSResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 struct Task {
@@ -116,6 +143,8 @@ static SLEEP_REGISTER: LazyLock<crossbeam::queue::SegQueue<(Instant, Waker)>> =
   LazyLock::new(|| crossbeam::queue::SegQueue::new());
 
 pub(super) fn read_fd<'a>(fd: &'a ArcFd, buf: &'a mut [u8]) -> impl Future<Output = DSSResult<usize>> + 'a {
+  fd_assert_nonblocking(fd);
+
   std::future::poll_fn(move |cx| match nix::unistd::read(fd, buf) {
     Ok(n) => Poll::Ready(Ok(n)),
     Err(nix::errno::Errno::EAGAIN) => {
@@ -127,14 +156,32 @@ pub(super) fn read_fd<'a>(fd: &'a ArcFd, buf: &'a mut [u8]) -> impl Future<Outpu
 }
 
 pub(super) fn write_fd<'a>(fd: &'a ArcFd, buf: &'a [u8]) -> impl Future<Output = DSSResult<usize>> + 'a {
+  fd_assert_nonblocking(fd);
+
   std::future::poll_fn(move |cx| match nix::unistd::write(fd, buf) {
     Ok(n) => Poll::Ready(Ok(n)),
     Err(nix::errno::Errno::EAGAIN) => {
       POLL_REGISTER.push((fd.as_raw_fd(), fd_poller::PollType::Write, cx.waker().clone()));
       Poll::Pending
     }
+    Err(nix::errno::Errno::EINTR) => {
+      cx.waker().wake_by_ref();
+      Poll::Pending
+    }
     Err(e) => Poll::Ready(Err(e.into())),
   })
+}
+
+pub(super) fn fd_assert_nonblocking<F: AsRawFd>(f: &F) {
+  let fd = f.as_raw_fd();
+  let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+  if flags == -1 {
+    panic!("fcntl failed");
+  }
+
+  if flags & libc::O_NONBLOCK == 0 {
+    panic!("fd is not nonblocking");
+  }
 }
 
 pub(super) fn fd_readable(fd: &ArcFd) -> DSSResult<bool> {
@@ -291,16 +338,21 @@ fn run_forever(task_receiver: Arc<crossbeam::queue::SegQueue<Arc<Task>>>) {
     crate::trace!("Running {} tasks", task_set.len());
 
     for (_, task) in task_set.drain() {
-      let _timer = noisytimer("future poll", 1);
       let waker = std::task::Waker::from(task.clone());
       let context = &mut std::task::Context::from_waker(&waker);
 
       let mut future_slot = task.future.lock().unwrap();
 
       if let Some(mut future) = future_slot.take() {
+        let start_time = Instant::now();
         if future.as_mut().poll(context).is_pending() {
           // Not done, put it back
           *future_slot = Some(future);
+        }
+        let end_time = Instant::now();
+        let duration = end_time - start_time;
+        if duration.as_millis() > 1 {
+          crate::warn!("Polling task took {:?}", duration);
         }
       } else {
         // This should never happen
@@ -604,7 +656,9 @@ where
     match poll_res {
       Poll::Ready(output) => Poll::Ready(Ok(output)),
       Poll::Pending => {
-        if let Some(registered_waker) = &this.registered_waker && registered_waker.will_wake(cx.waker()) {
+        if let Some(registered_waker) = &this.registered_waker
+          && registered_waker.will_wake(cx.waker())
+        {
           return Poll::Pending;
         }
 

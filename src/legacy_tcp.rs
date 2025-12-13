@@ -1,6 +1,7 @@
 use std::os::fd::AsRawFd;
 
 use bytes::{Bytes, BytesMut};
+use futures::{AsyncReadExt, AsyncWriteExt};
 
 use crate::leo_async::{self, ArcFd};
 use crate::{DSSResult, all_senders, gimli, info, log};
@@ -41,49 +42,28 @@ impl KeystreamGen {
   }
 }
 
-async fn fd_readexact(fd: &ArcFd, buf: &mut [u8]) -> DSSResult<()> {
-  let mut read = 0;
-  let l = buf.len();
+async fn asyncread_readexact_timeout<R: futures::AsyncRead + ?Sized + Unpin>(
+  reader: &mut R,
+  buf: &mut [u8],
+  timeout_ms: usize,
+) -> DSSResult<()> {
+  let read_task = async { reader.read_exact(buf).await };
 
-  while read < l {
-    let res = leo_async::read_fd(fd, &mut buf[read..]).await?;
-    read += res;
-
-    if res == 0 {
-      return Err("Read failed".into());
-    }
-  }
+  let read_task = std::pin::pin!(read_task);
+  leo_async::timeout_future(read_task, std::time::Duration::from_millis(timeout_ms as u64)).await??;
 
   Ok(())
 }
 
-async fn fd_readexact_timeout(fd: &ArcFd, buf: &mut [u8], timeout_ms: usize) -> DSSResult<()> {
-  let read = fd_readexact(fd, buf);
-  let read = std::pin::pin!(read);
-  leo_async::timeout_future(read, std::time::Duration::from_millis(timeout_ms as u64)).await??;
-  Ok(())
-}
+async fn asyncwrite_writeall_timeout<W: futures::AsyncWrite + ?Sized + Unpin>(
+  writer: &mut W,
+  buf: &[u8],
+  timeout_ms: usize,
+) -> DSSResult<()> {
+  let write_task = async { writer.write_all(buf).await };
 
-async fn fd_writeall(fd: &ArcFd, buf: &[u8]) -> DSSResult<()> {
-  let mut written = 0;
-  let l = buf.len();
-
-  while written < l {
-    let res = leo_async::write_fd(fd, &buf[written..]).await?;
-    written += res;
-
-    if res == 0 {
-      return Err("Write failed".into());
-    }
-  }
-
-  Ok(())
-}
-
-async fn fd_writeall_timeout(fd: &ArcFd, buf: &[u8], timeout_ms: usize) -> DSSResult<()> {
-  let write = fd_writeall(fd, buf);
-  let write = std::pin::pin!(write);
-  leo_async::timeout_future(write, std::time::Duration::from_millis(timeout_ms as u64)).await??;
+  let write_task = std::pin::pin!(write_task);
+  leo_async::timeout_future(write_task, std::time::Duration::from_millis(timeout_ms as u64)).await??;
   Ok(())
 }
 
@@ -177,7 +157,7 @@ async fn connect_impl(
   leo_async::socket::set_nodelay(&sock)?;
 
   let read_sock = sock.dup()?;
-  let write_sock = sock.dup()?;
+  let mut write_sock = sock.dup()?;
   crate::log!("Read sock: {}", read_sock.as_raw_fd());
   crate::log!("Write sock: {}", write_sock.as_raw_fd());
 
@@ -195,8 +175,9 @@ async fn connect_impl(
 
   let keyfinder = multigimli3(key, &sender_iv, b"keyfinder");
 
-  fd_writeall_timeout(&write_sock, &sender_iv, 30_000).await?;
-  fd_writeall_timeout(&write_sock, &keyfinder, 30_000).await?;
+  asyncwrite_writeall_timeout(&mut write_sock, &sender_iv, 30_000).await?;
+  asyncwrite_writeall_timeout(&mut write_sock, &keyfinder, 30_000).await?;
+  write_sock.flush().await?;
 
   let (sender_tx, sender_rx) = leo_async::mpsc::channel();
 
@@ -207,6 +188,7 @@ async fn connect_impl(
 
   let send_task = {
     async move {
+      let mut write_sock_bufwriter = futures::io::BufWriter::new(write_sock);
       let mut keystream = KeystreamGen::new(&send_enc_key);
       let mut packet_data = BytesMut::with_capacity(2048);
 
@@ -233,10 +215,17 @@ async fn connect_impl(
 
         let to_send = packet_data.split_to(packet_data.len()).freeze();
 
-        match fd_writeall_timeout(&write_sock, &to_send, 30_000).await {
+        match asyncwrite_writeall_timeout(&mut write_sock_bufwriter, &to_send, 30_000).await {
           Ok(_) => {}
           Err(e) => {
             crate::log!("connect_impl send_task write error: {}", e);
+            return;
+          }
+        }
+        match write_sock_bufwriter.flush().await {
+          Ok(_) => {}
+          Err(e) => {
+            crate::log!("connect_impl send_task flush error: {}", e);
             return;
           }
         }
@@ -248,18 +237,19 @@ async fn connect_impl(
     let key = key.to_owned();
 
     async move {
+      let mut read_sock_bufreader = futures::io::BufReader::new(read_sock);
       let key = &key;
 
       let recv_iv = {
         let mut buf = [0u8; 16];
-        fd_readexact_timeout(&read_sock, &mut buf, 30_000).await?;
+        asyncread_readexact_timeout(&mut read_sock_bufreader, &mut buf, 30000).await?;
         buf
       };
 
       let expected_keyfinder = multigimli3(key, &recv_iv, b"keyfinder");
       let recv_keyfinder = {
         let mut buf = [0u8; 16];
-        fd_readexact_timeout(&read_sock, &mut buf, 30000).await?;
+        asyncread_readexact_timeout(&mut read_sock_bufreader, &mut buf, 30000).await?;
         buf
       };
 
@@ -279,21 +269,21 @@ async fn connect_impl(
         leo_async::yield_now().await;
         // Read and decrypt length
         let mut len_buf = [0u8; 2];
-        fd_readexact_timeout(&read_sock, &mut len_buf, 30_000).await?;
+        asyncread_readexact_timeout(&mut read_sock_bufreader, &mut len_buf, 30_000).await?;
         len_buf[0] ^= keystream.next();
         len_buf[1] ^= keystream.next();
         let len = u16::from_le_bytes(len_buf);
 
         // Read and decrypt data
         data.resize(len as usize, 0);
-        fd_readexact_timeout(&read_sock, &mut data, 30_000).await?;
+        asyncread_readexact_timeout(&mut read_sock_bufreader, &mut data, 30_000).await?;
         for byte in data.iter_mut() {
           *byte ^= keystream.next();
         }
 
         // Read and decrypt MAC
         let mut mac = [0u8; 16];
-        fd_readexact_timeout(&read_sock, &mut mac, 30_000).await?;
+        asyncread_readexact_timeout(&mut read_sock_bufreader, &mut mac, 30_000).await?;
         for byte in &mut mac {
           *byte ^= keystream.next();
         }
@@ -357,21 +347,21 @@ pub async fn handle_connection(
   let all_senders = all_senders::get();
   leo_async::socket::set_nodelay(&conn)?;
 
-  let read_sock = conn.dup()?;
-  let write_sock = conn.dup()?;
+  let mut read_sock = conn.dup()?;
+  let mut write_sock = conn.dup()?;
 
   fd_make_nonblocking(&read_sock)?;
   fd_make_nonblocking(&write_sock)?;
 
   let incoming_iv = {
     let mut buf = [0u8; 16];
-    fd_readexact_timeout(&read_sock, &mut buf, 30_000).await?;
+    asyncread_readexact_timeout(&mut read_sock, &mut buf, 30_000).await?;
     buf
   };
 
   let incoming_keyfinder = {
     let mut buf = [0u8; 16];
-    fd_readexact_timeout(&read_sock, &mut buf, 30_000).await?;
+    asyncread_readexact_timeout(&mut read_sock, &mut buf, 30_000).await?;
     buf
   };
 
@@ -405,8 +395,9 @@ pub async fn handle_connection(
 
   let send_keyfinder = multigimli3(&found_key, &send_iv, b"keyfinder");
 
-  fd_writeall_timeout(&write_sock, &send_iv, 30_000).await?;
-  fd_writeall_timeout(&write_sock, &send_keyfinder, 30_000).await?;
+  asyncwrite_writeall_timeout(&mut write_sock, &send_iv, 30_000).await?;
+  asyncwrite_writeall_timeout(&mut write_sock, &send_keyfinder, 30_000).await?;
+  write_sock.flush().await?;
 
   let send_enc_key = multigimli3(&found_key, &send_iv, b"enc_key");
   let send_mac_key = multigimli3(&found_key, &send_iv, b"mac_key");
@@ -416,6 +407,7 @@ pub async fn handle_connection(
 
   let sender_task = {
     async move {
+      let mut write_sock_bufwriter = futures::io::BufWriter::new(write_sock);
       let mut keystream = KeystreamGen::new(&send_enc_key);
       let mut packet_data = BytesMut::with_capacity(2048);
 
@@ -441,9 +433,16 @@ pub async fn handle_connection(
 
         let to_send = packet_data.split_to(packet_data.len()).freeze();
 
-        match fd_writeall_timeout(&write_sock, &to_send, 30_000).await {
+        match asyncwrite_writeall_timeout(&mut write_sock_bufwriter, &to_send, 30_000).await {
           Ok(_) => {}
           Err(_) => return,
+        }
+        match write_sock_bufwriter.flush().await {
+          Ok(_) => {}
+          Err(e) => {
+            crate::log!("handle_connection sender_task flush error: {}", e);
+            return;
+          }
         }
       }
     }
@@ -451,6 +450,7 @@ pub async fn handle_connection(
 
   let recv_task = {
     async move {
+      let mut read_sock_bufreader = futures::io::BufReader::new(read_sock);
       let mut keystream = KeystreamGen::new(&recv_enc_key);
       let mut data = BytesMut::with_capacity(2048);
 
@@ -458,21 +458,21 @@ pub async fn handle_connection(
         leo_async::yield_now().await;
         // Read and decrypt length
         let mut len_buf = [0u8; 2];
-        fd_readexact_timeout(&read_sock, &mut len_buf, 30_000).await?;
+        asyncread_readexact_timeout(&mut read_sock_bufreader, &mut len_buf, 30_000).await?;
         len_buf[0] ^= keystream.next();
         len_buf[1] ^= keystream.next();
         let len = u16::from_le_bytes(len_buf);
 
         // Read and decrypt data
         data.resize(len as usize, 0);
-        fd_readexact_timeout(&read_sock, &mut data, 30_000).await?;
+        asyncread_readexact_timeout(&mut read_sock_bufreader, &mut data, 30_000).await?;
         for byte in data.iter_mut() {
           *byte ^= keystream.next();
         }
 
         // Read and decrypt MAC
         let mut mac = [0u8; 16];
-        fd_readexact_timeout(&read_sock, &mut mac, 30_000).await?;
+        asyncread_readexact_timeout(&mut read_sock_bufreader, &mut mac, 30_000).await?;
         for byte in &mut mac {
           *byte ^= keystream.next();
         }

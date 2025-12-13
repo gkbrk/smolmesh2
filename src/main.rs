@@ -162,6 +162,8 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
 
     let _route_adder = tun.route_creator();
     route_adder.replace(_route_adder);
+
+    std::mem::forget(tun);
   }
 
   #[cfg(windows)]
