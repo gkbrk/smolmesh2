@@ -437,11 +437,20 @@ pub async fn handle_connection(
           Ok(_) => {}
           Err(_) => return,
         }
-        match write_sock_bufwriter.flush().await {
-          Ok(_) => {}
-          Err(e) => {
-            crate::log!("handle_connection sender_task flush error: {}", e);
-            return;
+
+        let should_flush = sender_rx.peek(|x| match x {
+          None => true,
+          Some(x) if x.is_empty() => true,
+          _ => false,
+        });
+
+        if should_flush {
+          match write_sock_bufwriter.flush().await {
+            Ok(_) => {}
+            Err(e) => {
+              crate::log!("handle_connection sender_task flush error: {}", e);
+              return;
+            }
           }
         }
       }

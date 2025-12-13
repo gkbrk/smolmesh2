@@ -592,6 +592,11 @@ pub(super) mod mpsc {
         }
       })
     }
+
+    pub fn peek<F>(&self, f: impl FnOnce(Option<&T>) -> F) -> F {
+      let inner = self.inner.lock().unwrap();
+      f(inner.q.front())
+    }
   }
 
   impl<T> Drop for Receiver<T> {
