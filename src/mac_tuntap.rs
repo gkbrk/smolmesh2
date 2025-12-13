@@ -3,7 +3,7 @@ use std::os::fd::AsRawFd;
 use bytes::{BufMut, Bytes, BytesMut};
 use tun_rs::{DeviceBuilder, SyncDevice};
 
-use crate::leo_async::{self, ArcFd};
+use crate::{DSSResult, leo_async::{self, ArcFd}};
 
 pub(crate) struct TunInterface {
   _device: SyncDevice,
@@ -26,11 +26,25 @@ impl TunInterface {
     }
   }
 
-  pub(crate) fn open(ifname: &str) -> Self {
-    let device = DeviceBuilder::new()
-      .name(ifname)
-      .build_sync()
-      .expect("Failed to create TUN device");
+  fn open_sync_device() -> DSSResult<SyncDevice> {
+    for i in 0..100 {
+      let name = format!("utun{}", i);
+      let device = DeviceBuilder::new()
+        .name(&name)
+        .build_sync();
+
+      match device {
+        Ok(device) => return Ok(device),
+        Err(e) => crate::debug!("Failed to create TUN device `{}`: {}", name, e),
+      }
+    }
+
+    Err("Failed to create TUN device after 100 attempts".into())
+  }
+
+  pub(crate) fn open() -> Self {
+    let device = Self::open_sync_device().expect("Failed to create TUN device");
+    let ifname = device.name().expect("Failed to get TUN device name");
 
     // Get the raw fd from the device
     let raw_fd = device.as_raw_fd();
@@ -42,7 +56,7 @@ impl TunInterface {
     Self {
       _device: device,
       fd,
-      name: ifname.to_string(),
+      name: ifname,
     }
   }
 

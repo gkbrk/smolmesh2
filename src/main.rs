@@ -154,8 +154,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
 
   #[cfg(target_os = "macos")]
   if let Some(true) = config["macos_tuntap"].as_bool() {
-    let interface_name = config["macos_interface_name"].as_str().unwrap_or("utun7");
-    let tun = mac_tuntap::TunInterface::open(interface_name);
+    let tun = mac_tuntap::TunInterface::open();
     tun.set_ip6(&node_ip, 128).await;
 
     let _tun_sender = tun.run();
