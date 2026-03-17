@@ -130,6 +130,22 @@ struct Task {
   scheduled: std::sync::atomic::AtomicBool,
 }
 
+fn poke_wake_pipe() -> Result<(), ()> {
+  let buf = [0u8];
+  let pipe = WAKE_PIPE_SEND.get().unwrap();
+
+  loop {
+    match nix::unistd::write(pipe, &buf) {
+      Ok(1) => return Ok(()),
+      Ok(_) => return Err(()),
+      // If the pipe is full, poll() is already guaranteed to wake.
+      Err(nix::errno::Errno::EAGAIN) => return Ok(()),
+      Err(nix::errno::Errno::EINTR) => continue,
+      Err(_) => return Err(()),
+    }
+  }
+}
+
 impl std::task::Wake for Task {
   fn wake(self: Arc<Self>) {
     if self
@@ -138,6 +154,7 @@ impl std::task::Wake for Task {
       .is_ok()
     {
       TASK_SENDER.get().unwrap().push(self);
+      poke_wake_pipe().expect("Failed to write to wake pipe");
     }
   }
 
@@ -148,6 +165,7 @@ impl std::task::Wake for Task {
       .is_ok()
     {
       TASK_SENDER.get().unwrap().push(self.clone());
+      poke_wake_pipe().expect("Failed to write to wake pipe");
     }
   }
 }
@@ -159,6 +177,9 @@ static POLL_REGISTER: LazyLock<crossbeam::queue::SegQueue<(RawFd, fd_poller::Pol
 
 static SLEEP_REGISTER: LazyLock<crossbeam::queue::SegQueue<(Instant, Waker)>> =
   LazyLock::new(|| crossbeam::queue::SegQueue::new());
+
+static WAKE_PIPE_SEND: OnceLock<ArcFd> = OnceLock::new();
+static WAKE_PIPE_RECV: OnceLock<ArcFd> = OnceLock::new();
 
 pub(super) fn read_fd<'a>(fd: &'a ArcFd, buf: &'a mut [u8]) -> impl Future<Output = DSSResult<usize>> + 'a {
   fd_assert_nonblocking(fd);
@@ -268,6 +289,22 @@ where
   sender.push(task);
 }
 
+fn fd_make_nonblocking(fd: &ArcFd) -> DSSResult<()> {
+  let fd = fd.as_raw_fd();
+  let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+  if flags == -1 {
+    return Err("fcntl failed".into());
+  }
+
+  let flags = flags | libc::O_NONBLOCK;
+  let res = unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+  if res == -1 {
+    return Err("fcntl failed".into());
+  }
+
+  Ok(())
+}
+
 pub(super) fn run_main<F, T>(future: F) -> T
 where
   F: Future<Output = T> + Send + 'static,
@@ -275,6 +312,18 @@ where
 {
   let sender = crossbeam::queue::SegQueue::new();
   TASK_SENDER.set(sender).unwrap();
+
+  {
+    let (wake_pipe_recv, wake_pipe_send) = nix::unistd::pipe().expect("Failed to create wake pipe");
+    if WAKE_PIPE_RECV.set(ArcFd::from_owned_fd(wake_pipe_recv)).is_err() {
+      panic!("WAKE_PIPE_RECV already initialized");
+    }
+    if WAKE_PIPE_SEND.set(ArcFd::from_owned_fd(wake_pipe_send)).is_err() {
+      panic!("WAKE_PIPE_SEND already initialized");
+    }
+    fd_make_nonblocking(WAKE_PIPE_RECV.get().unwrap()).unwrap();
+    fd_make_nonblocking(WAKE_PIPE_SEND.get().unwrap()).unwrap();
+  }
 
   let result_receiver = {
     let (result_sender, result_receiver) = std::sync::mpsc::channel();
@@ -746,7 +795,10 @@ mod fd_poller {
 
   use nix::poll::{PollFd, PollFlags, PollTimeout};
 
-  use crate::{DSSResult, leo_async::POLL_REGISTER};
+  use crate::{
+    DSSResult,
+    leo_async::{POLL_REGISTER, WAKE_PIPE_RECV},
+  };
 
   #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
   pub enum PollType {
@@ -795,13 +847,19 @@ mod fd_poller {
       cache.fds.push(PollFd::new(
         unsafe { BorrowedFd::borrow_raw(*fd) },
         match (has_read, has_write) {
-          (true, true) => PollFlags::POLLIN | PollFlags::POLLOUT,
-          (true, false) => PollFlags::POLLIN,
-          (false, true) => PollFlags::POLLOUT,
+          (true, true) => PollFlags::POLLIN | PollFlags::POLLOUT | PollFlags::POLLHUP | PollFlags::POLLERR,
+          (true, false) => PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR,
+          (false, true) => PollFlags::POLLOUT | PollFlags::POLLHUP | PollFlags::POLLERR,
           (false, false) => unreachable!(),
         },
       ));
     }
+
+    let wake_pipe_recv = WAKE_PIPE_RECV.get().unwrap().as_raw_fd();
+    cache.fds.push(PollFd::new(
+      unsafe { BorrowedFd::borrow_raw(wake_pipe_recv) },
+      PollFlags::POLLIN,
+    ));
 
     crate::trace!("Polling {} fds", cache.fds.len());
     let ready_count = nix::poll::poll(&mut cache.fds, PollTimeout::try_from(timeout_ms).unwrap())?;
@@ -809,6 +867,22 @@ mod fd_poller {
 
     for poll_fd in cache.fds.iter() {
       let revents = poll_fd.revents().ok_or("Cannot read revents")?;
+
+      if poll_fd.as_fd().as_raw_fd() == wake_pipe_recv {
+        let mut buf = [0u8; 2048];
+        let fd = WAKE_PIPE_RECV.get().unwrap();
+
+        loop {
+          match nix::unistd::read(fd, &mut buf) {
+            Ok(0) => break,
+            Ok(_) => continue,
+            Err(nix::errno::Errno::EAGAIN) => break,
+            Err(e) => panic!("Failed to read from wake pipe: {}", e),
+          }
+        }
+
+        continue;
+      }
 
       if !revents.is_empty() {
         for (_, waker_id) in cache.poll_state.get(&poll_fd.as_fd().as_raw_fd()).unwrap().iter() {
