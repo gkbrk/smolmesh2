@@ -4,6 +4,10 @@ extern crate lazy_static;
 use std::collections::{HashSet, VecDeque};
 
 use bytes::{BufMut, Bytes, BytesMut};
+use futures::{
+  StreamExt,
+  channel::mpsc::{UnboundedSender, unbounded},
+};
 use leo_async::DSSResult;
 
 mod all_senders;
@@ -56,7 +60,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
 
   let mut seen_packets = seen_packets::SeenPackets::new(16_384);
 
-  let (sender, receiver) = leo_async::mpsc::channel();
+  let (sender, mut receiver) = unbounded::<(Bytes, UnboundedSender<Bytes>)>();
 
   // Thread to broadcast our node. This allows all nodes in the network to
   // learn the path to us.
@@ -127,8 +131,8 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
     legacy_tcp::listener(port, keys, sender.clone());
   }
 
-  let mut tun_sender: Option<leo_async::mpsc::Sender<Bytes>> = None;
-  let mut route_adder: Option<leo_async::mpsc::Sender<ip_addr::IpAddr>> = None;
+  let mut tun_sender: Option<UnboundedSender<Bytes>> = None;
+  let mut route_adder: Option<UnboundedSender<ip_addr::IpAddr>> = None;
 
   #[cfg(target_os = "linux")]
   if let Some(true) = config["linux_tuntap"].as_bool() {
@@ -175,7 +179,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
   }
 
   loop {
-    let (data, _sender) = receiver.recv().await.unwrap();
+    let (data, _sender) = receiver.next().await.unwrap();
     leo_async::yield_now().await;
     // drop too-short packets before parsing headers
     if data.len() < 9 {
@@ -214,7 +218,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
 
           // Add route to the node
           if let Some(route_adder) = &route_adder {
-            route_adder.send(addr).unwrap();
+            route_adder.unbounded_send(addr).unwrap();
           }
         }
 
@@ -232,7 +236,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
 
         // Add route to the node
         if let Some(route_adder) = &route_adder {
-          route_adder.send(addr).unwrap();
+          route_adder.unbounded_send(addr).unwrap();
         }
       }
       2 => {
@@ -247,7 +251,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
 
         // Add route to the node
         if let Some(route_adder) = &route_adder {
-          route_adder.send(addr).unwrap();
+          route_adder.unbounded_send(addr).unwrap();
         }
       }
       3 => {
@@ -264,7 +268,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
 
         if our_ips.contains(&target_addr) {
           if let Some(sender) = &tun_sender {
-            sender.send(data).unwrap();
+            sender.unbounded_send(data).unwrap();
           }
         } else {
           all_senders.send_to_fastest(target_addr, orig_data);

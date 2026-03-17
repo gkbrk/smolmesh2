@@ -1,6 +1,10 @@
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use bytes::{BufMut, Bytes, BytesMut};
+use futures::{
+  StreamExt,
+  channel::mpsc::{UnboundedSender, unbounded},
+};
 
 use crate::leo_async::{self, ArcFd, DSSResult};
 
@@ -100,7 +104,7 @@ impl TunInterface {
     proc.spawn().unwrap().wait().unwrap();
   }
 
-  pub(crate) fn run(&self) -> leo_async::mpsc::Sender<Bytes> {
+  pub(crate) fn run(&self) -> UnboundedSender<Bytes> {
     let read_fd = self.fd.dup().unwrap();
     let write_fd = self.fd.dup().unwrap();
 
@@ -148,14 +152,12 @@ impl TunInterface {
     }
 
     // network -> tun
-    let (sender, receiver) = leo_async::mpsc::channel::<Bytes>();
+    let (sender, mut receiver) = unbounded::<Bytes>();
 
     {
       leo_async::spawn(async move {
-        loop {
-          if let Some(packet) = receiver.recv().await {
-            leo_async::write_fd(&write_fd, &packet).await.unwrap();
-          }
+        while let Some(packet) = receiver.next().await {
+          leo_async::write_fd(&write_fd, &packet).await.unwrap();
         }
       });
     }
@@ -163,13 +165,13 @@ impl TunInterface {
     sender
   }
 
-  pub(crate) fn route_creator(&self) -> leo_async::mpsc::Sender<crate::ip_addr::IpAddr> {
-    let (sender, receiver) = leo_async::mpsc::channel::<crate::ip_addr::IpAddr>();
+  pub(crate) fn route_creator(&self) -> UnboundedSender<crate::ip_addr::IpAddr> {
+    let (sender, mut receiver) = unbounded::<crate::ip_addr::IpAddr>();
 
     let mut already_added = std::collections::HashSet::new();
 
     leo_async::spawn(async move {
-      while let Some(addr) = receiver.recv().await {
+      while let Some(addr) = receiver.next().await {
         if already_added.contains(&addr) {
           continue;
         }

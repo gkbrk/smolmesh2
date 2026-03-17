@@ -1,7 +1,10 @@
 use std::os::fd::AsRawFd;
 
 use bytes::{Bytes, BytesMut};
-use futures::{AsyncReadExt, AsyncWriteExt};
+use futures::{
+  AsyncReadExt, AsyncWriteExt, StreamExt,
+  channel::mpsc::{UnboundedSender, unbounded},
+};
 
 use crate::leo_async::{self, ArcFd};
 use crate::{DSSResult, all_senders, gimli, info, log};
@@ -148,7 +151,7 @@ async fn connect_impl(
   host: &str,
   port: u16,
   key: &[u8],
-  incoming: leo_async::mpsc::Sender<(Bytes, leo_async::mpsc::Sender<Bytes>)>,
+  incoming: UnboundedSender<(Bytes, UnboundedSender<Bytes>)>,
 ) -> DSSResult<()> {
   crate::log!("Connecting to {}:{}", host, port);
   let addr: std::net::SocketAddr = format!("{}:{}", host, port).parse()?;
@@ -179,7 +182,7 @@ async fn connect_impl(
   asyncwrite_writeall_timeout(&mut write_sock, &keyfinder, 30_000).await?;
   write_sock.flush().await?;
 
-  let (sender_tx, sender_rx) = leo_async::mpsc::channel();
+  let (sender_tx, mut sender_rx) = unbounded::<Bytes>();
 
   all_senders.add(sender_tx.clone());
 
@@ -193,7 +196,9 @@ async fn connect_impl(
       let mut packet_data = BytesMut::with_capacity(2048);
 
       loop {
-        let data = sender_rx.recv().await.unwrap();
+        let Some(data) = sender_rx.next().await else {
+          return;
+        };
         leo_async::yield_now().await;
 
         // Empty data means there is a cleaner checking the channel
@@ -297,7 +302,7 @@ async fn connect_impl(
 
         let to_send = data.split_to(data.len()).freeze();
 
-        if let Err(err) = incoming.send((to_send, sender_tx.clone())) {
+        if let Err(err) = incoming.unbounded_send((to_send, sender_tx.clone())) {
           log!("Error sending data: {:?}", err);
           break;
         }
@@ -318,7 +323,7 @@ pub fn create_connection(
   host: &str,
   port: u16,
   key: &[u8],
-  incoming: leo_async::mpsc::Sender<(Bytes, leo_async::mpsc::Sender<Bytes>)>,
+  incoming: UnboundedSender<(Bytes, UnboundedSender<Bytes>)>,
 ) {
   let host = host.to_owned();
   let key = key.to_owned();
@@ -342,7 +347,7 @@ pub fn create_connection(
 pub async fn handle_connection(
   keys: Vec<Vec<u8>>,
   conn: ArcFd,
-  incoming: leo_async::mpsc::Sender<(Bytes, leo_async::mpsc::Sender<Bytes>)>,
+  incoming: UnboundedSender<(Bytes, UnboundedSender<Bytes>)>,
 ) -> DSSResult<()> {
   let all_senders = all_senders::get();
   leo_async::socket::set_nodelay(&conn)?;
@@ -402,7 +407,7 @@ pub async fn handle_connection(
   let send_enc_key = multigimli3(&found_key, &send_iv, b"enc_key");
   let send_mac_key = multigimli3(&found_key, &send_iv, b"mac_key");
 
-  let (sender_tx, sender_rx) = leo_async::mpsc::channel();
+  let (sender_tx, mut sender_rx) = unbounded::<Bytes>();
   all_senders.add(sender_tx.clone());
 
   let sender_task = {
@@ -413,7 +418,9 @@ pub async fn handle_connection(
 
       loop {
         leo_async::yield_now().await;
-        let packet = sender_rx.recv().await.unwrap();
+        let Some(packet) = sender_rx.next().await else {
+          return;
+        };
         // Empty data means there is a cleaner checking the channel
         if packet.is_empty() {
           continue;
@@ -438,19 +445,11 @@ pub async fn handle_connection(
           Err(_) => return,
         }
 
-        let should_flush = sender_rx.peek(|x| match x {
-          None => true,
-          Some(x) if x.is_empty() => true,
-          _ => false,
-        });
-
-        if should_flush {
-          match write_sock_bufwriter.flush().await {
-            Ok(_) => {}
-            Err(e) => {
-              crate::log!("handle_connection sender_task flush error: {}", e);
-              return;
-            }
+        match write_sock_bufwriter.flush().await {
+          Ok(_) => {}
+          Err(e) => {
+            crate::log!("handle_connection sender_task flush error: {}", e);
+            return;
           }
         }
       }
@@ -494,7 +493,10 @@ pub async fn handle_connection(
         }
 
         let to_send = data.split_to(data.len()).freeze();
-        incoming.send((to_send, sender_tx.clone())).unwrap();
+        if let Err(err) = incoming.unbounded_send((to_send, sender_tx.clone())) {
+          log!("Error sending data: {:?}", err);
+          break;
+        }
       }
 
       DSSResult::Ok(())
@@ -511,7 +513,7 @@ pub async fn handle_connection(
 pub async fn listener_impl(
   port: u16,
   keys: Vec<Vec<u8>>,
-  incoming: leo_async::mpsc::Sender<(Bytes, leo_async::mpsc::Sender<Bytes>)>,
+  incoming: UnboundedSender<(Bytes, UnboundedSender<Bytes>)>,
 ) -> DSSResult<()> {
   let socket = leo_async::socket::socket()?;
   fd_make_nonblocking(&socket)?;
@@ -545,7 +547,7 @@ pub async fn listener_impl(
 pub fn listener(
   port: u16,
   keys: Vec<Vec<u8>>,
-  incoming: leo_async::mpsc::Sender<(Bytes, leo_async::mpsc::Sender<Bytes>)>,
+  incoming: UnboundedSender<(Bytes, UnboundedSender<Bytes>)>,
 ) {
   leo_async::spawn(async move {
     loop {

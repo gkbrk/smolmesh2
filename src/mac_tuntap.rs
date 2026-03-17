@@ -3,7 +3,15 @@ use std::os::fd::AsRawFd;
 use bytes::{BufMut, Bytes, BytesMut};
 use tun_rs::{DeviceBuilder, SyncDevice};
 
-use crate::{DSSResult, leo_async::{self, ArcFd}};
+use crate::{
+  DSSResult,
+  leo_async::{self, ArcFd},
+};
+
+use futures::{
+  StreamExt,
+  channel::mpsc::{UnboundedSender, unbounded},
+};
 
 pub(crate) struct TunInterface {
   _device: SyncDevice,
@@ -29,9 +37,7 @@ impl TunInterface {
   fn open_sync_device() -> DSSResult<SyncDevice> {
     for i in 0..100 {
       let name = format!("utun{}", i);
-      let device = DeviceBuilder::new()
-        .name(&name)
-        .build_sync();
+      let device = DeviceBuilder::new().name(&name).build_sync();
 
       match device {
         Ok(device) => return Ok(device),
@@ -70,7 +76,7 @@ impl TunInterface {
       let mut proc = std::process::Command::new("sh");
       proc.arg("-c");
       proc.arg(cmd);
-      
+
       if let Err(e) = proc.spawn().and_then(|mut c| c.wait()) {
         crate::warn!("Failed to set IPv6 address: {}", e);
       }
@@ -78,7 +84,7 @@ impl TunInterface {
     .await;
   }
 
-  pub(crate) fn run(&self) -> leo_async::mpsc::Sender<Bytes> {
+  pub(crate) fn run(&self) -> UnboundedSender<Bytes> {
     let read_fd = self.fd.dup().unwrap();
     let write_fd = self.fd.dup().unwrap();
 
@@ -138,37 +144,35 @@ impl TunInterface {
     }
 
     // network -> tun
-    let (sender, receiver) = leo_async::mpsc::channel::<Bytes>();
+    let (sender, mut receiver) = unbounded::<Bytes>();
 
     {
       leo_async::spawn(async move {
         let mut write_buf = BytesMut::with_capacity(2048);
-        
-        loop {
-          if let Some(packet) = receiver.recv().await {
-            // On macOS, we need to prepend the 4-byte protocol family header
-            // Determine protocol from IP version
-            let ip_version = (packet[0] & 0b11110000) >> 4;
 
-            // Protocol family: 2 = AF_INET (IPv4), 30 = AF_INET6 (IPv6) on macOS
-            let proto_family: [u8; 4] = match ip_version {
-              4 => [0x00, 0x00, 0x00, 0x02], // AF_INET in network byte order
-              6 => [0x00, 0x00, 0x00, 0x1e], // AF_INET6 (30) in network byte order
-              _ => {
-                crate::warn!("Unknown IP version when writing: {}", ip_version);
-                continue;
-              }
-            };
+        while let Some(packet) = receiver.next().await {
+          // On macOS, we need to prepend the 4-byte protocol family header
+          // Determine protocol from IP version
+          let ip_version = (packet[0] & 0b11110000) >> 4;
 
-            // Build packet with header
-            write_buf.clear();
-            write_buf.extend_from_slice(&proto_family);
-            write_buf.extend_from_slice(&packet);
-
-            // Write the complete packet with header
-            if let Err(e) = leo_async::write_fd(&write_fd, &write_buf).await {
-              crate::warn!("TUN write error: {}", e);
+          // Protocol family: 2 = AF_INET (IPv4), 30 = AF_INET6 (IPv6) on macOS
+          let proto_family: [u8; 4] = match ip_version {
+            4 => [0x00, 0x00, 0x00, 0x02], // AF_INET in network byte order
+            6 => [0x00, 0x00, 0x00, 0x1e], // AF_INET6 (30) in network byte order
+            _ => {
+              crate::warn!("Unknown IP version when writing: {}", ip_version);
+              continue;
             }
+          };
+
+          // Build packet with header
+          write_buf.clear();
+          write_buf.extend_from_slice(&proto_family);
+          write_buf.extend_from_slice(&packet);
+
+          // Write the complete packet with header
+          if let Err(e) = leo_async::write_fd(&write_fd, &write_buf).await {
+            crate::warn!("TUN write error: {}", e);
           }
         }
       });
@@ -177,14 +181,14 @@ impl TunInterface {
     sender
   }
 
-  pub(crate) fn route_creator(&self) -> leo_async::mpsc::Sender<crate::ip_addr::IpAddr> {
-    let (sender, receiver) = leo_async::mpsc::channel::<crate::ip_addr::IpAddr>();
+  pub(crate) fn route_creator(&self) -> UnboundedSender<crate::ip_addr::IpAddr> {
+    let (sender, mut receiver) = unbounded::<crate::ip_addr::IpAddr>();
     let name = self.name.clone();
 
     let mut already_added = std::collections::HashSet::new();
 
     leo_async::spawn(async move {
-      while let Some(addr) = receiver.recv().await {
+      while let Some(addr) = receiver.next().await {
         if already_added.contains(&addr) {
           continue;
         }
@@ -206,7 +210,7 @@ impl TunInterface {
           proc.arg(cmd);
           proc.stdout(std::process::Stdio::null());
           proc.stderr(std::process::Stdio::null());
-          
+
           if let Err(e) = proc.spawn().and_then(|mut c| c.wait()) {
             crate::trace!("Failed to add route (may already exist): {}", e);
           }
