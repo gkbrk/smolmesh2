@@ -1,102 +1,50 @@
-# Smolmesh2
+# smolmesh2 (Rust)
 
-Welcome to Smolmesh2! 🌐
+The original smolmesh2 node, for Linux and macOS. It uses its own small async
+runtime built on `poll()`, in `src/leo_async.rs`.
 
-Smolmesh2 is a powerful mesh networking tool written in Rust that allows nodes to communicate over various transports while maintaining a decentralized and resilient network structure. It supports Linux and Windows operating systems and includes several key features to facilitate seamless communication and network stability.
+See the [main README](../README.md) for how smolmesh2 works and how to write a
+config file.
 
-## Features
+## Build
 
-- **IPv4 and IPv6 Support:** Handles both IPv4 and IPv6 addresses with automatic route management
-- **Multiple Transports:** Supports legacy TCP connections, both for connecting and listening using encrypted channels
-- **TUN/TAP Interface:** Integrates with TUN/TAP interfaces on Linux and Wintun on Windows to manage network traffic
-- **Packet Routing and Broadcasting:** Efficiently routes packets to their destinations using fastest path discovery and broadcasts node availability
-- **Automatic Path Discovery:** Discovers and maintains optimal paths between nodes
-- **Encrypted Communications:** All communications are encrypted using the SPECK cipher for lightweight but effective security
-- **Duplicate Packet Detection:** Prevents packet loops using efficient packet tracking with hash-based detection
-- **Asynchronous Architecture:** Custom async runtime (leo_async) for efficient I/O operations
-- **Cross-Platform Support:** Works on both Linux and Windows with platform-specific networking implementations
-
-## Commands
-
-- **help, --help:** Show help message with available commands
-- **meshnode [config-file]:** Runs the mesh node with the specified configuration file
-- **name-to-ipv6 [node-name]:** Converts a node name to its corresponding IPv6 address
-- **make-random-ipv4:** Generates a random IPv4 address
-- **make-random-ipv6:** Generates a random IPv6 address with fd00::/8 prefix
-
-## Usage
-
-To start a mesh node, run:
-```bash
-cargo run -- meshnode config.json
-```
-This will initialize the node using the configuration specified in `config.json`. See the [Configuration](#configuration) section below for details.
-
-## Configuration
-
-The configuration file (`config.json`) should include details such as node name, IP addresses, and transport methods. Below is an example configuration:
-
-```json
-{
-  "node_name": "example_node",
-  "linux_tuntap": true,
-  "transports": [
-    {
-      "type": "legacy_tcp_connect",
-      "host": "example.com",
-      "port": 12345,
-      "key": "encryption_key_here"
-    },
-    {
-      "type": "legacy_tcp_listen",
-      "port": 54321,
-      "keys": ["allowed_key1", "allowed_key2"]
-    }
-  ]
-}
+```sh
+cargo build --release
 ```
 
-Optional fields:
-- `ipv4_addresses`: Array of IPv4 addresses this node should handle (e.g., `["192.168.1.1"]`)
-- `windows_tuntap`: Boolean to enable Windows TUN/TAP support (default: false)
+The binary is `target/release/smolmesh2`. To cross-compile a static Linux
+binary, see [doc/cross-platform-linux-build.md](doc/cross-platform-linux-build.md).
 
-## Platform-Specific Features
+Run the tests with `cargo test`.
 
-### Linux
-- Uses native TUN/TAP interfaces for virtual network adapters
-- Automatically configures IP routes and interface settings
-- Requires TUN/TAP kernel support
+## Run
 
-### Windows
-- Uses Wintun driver for virtual network adapter functionality
-- Automatically configures IPv6 addresses for the virtual adapter
-- Requires the Wintun driver (wintun-amd64.dll) in the working directory
+```sh
+sudo target/release/smolmesh2 meshnode config.json
+```
 
-## Technical Details
+Root is only needed for the TUN interface. Without `linux_tuntap` or
+`macos_tuntap`, the node runs as a normal user and only relays traffic.
 
-### Network Protocol
-- Uses a custom packet format with timestamp, command type, and payload
-- Supports node discovery, IP address broadcasting, and data transfer
-- Implements duplicate packet detection to prevent loops
+`host` in a `legacy_tcp_connect` transport has to be an IPv4 address.
+Hostnames and IPv6 addresses don't work.
 
-### Security
-- All transport connections are encrypted using the SPECK cipher
-- Uses challenge-response authentication for connection establishment
-- Implements MAC (Message Authentication Code) for packet integrity
+The other commands (`name-to-ipv6`, `make-random-ipv4`, `make-random-ipv6` and
+`help`) print their result but don't exit. Stop them with Ctrl+C.
 
-### Networking
-- Custom async networking stack for efficient I/O operations
-- Supports non-blocking socket operations
-- Implements timeout handling for network operations
+## Platforms
 
-## Dependencies
+- **Linux** on x86_64 or aarch64. `linux_tuntap` creates an interface named
+  `smolmesh1` through `/dev/net/tun` and sets it up with the `ip` command from
+  iproute2.
+- **macOS**. `macos_tuntap` uses the first free `utun` interface and sets it up
+  with `ifconfig` and `route`. The interface only gets the node's IPv6 address.
+  `ipv4_addresses` are announced to the mesh but not added to the interface.
+- **Windows** isn't supported. The code uses Unix APIs, and
+  `src/windows_tuntap.rs` and `src/wintun.rs` are from an older version and
+  don't compile. Use the [.NET version](../dotnet/) on Windows.
 
-### System Requirements
-- **Linux:** TUN/TAP kernel support (usually available by default)
-- **Windows:** Wintun driver (wintun-amd64.dll) in the working directory
+## Profiling on macOS
 
-## Contributing
-
-Contributions are welcome! Please open an issue or submit a pull request on GitHub. For major changes, please discuss them in an issue first to ensure they align with the project's goals.
-
-Enjoy using Smolmesh2 to build decentralized and resilient networks!
+Sign the binary with `Entitlements.plist` before profiling it. See
+[doc/mac-profiling.md](doc/mac-profiling.md).
