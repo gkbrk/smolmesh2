@@ -7,3 +7,6 @@ autoconfigs/
 deploy.sh
 deploy.py
 target/
+dotnet/**/bin/
+dotnet/**/obj/
+dotnet/publish/
