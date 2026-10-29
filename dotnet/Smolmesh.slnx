@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Smolmesh.Tests/Smolmesh.Tests.csproj" />
+  <Project Path="Smolmesh/Smolmesh.csproj" />
+</Solution>
