@@ -1,7 +1,7 @@
 using System.Buffers.Binary;
+using System.IO.Hashing;
 using System.Net;
 using System.Numerics;
-using System.Security.Cryptography;
 using System.Text;
 
 namespace Smolmesh;
@@ -65,12 +65,12 @@ internal static class Protocol
 // Local-only fingerprints need not match Rust's FxHasher on the wire.
 internal sealed class SeenPackets(int capacity)
 {
-    private readonly HashSet<string> hashes = [];
-    private readonly Queue<string> order = new();
+    private readonly HashSet<ulong> hashes = [];
+    private readonly Queue<ulong> order = new();
 
     internal bool Add(ReadOnlySpan<byte> packet)
     {
-        string hash = Convert.ToHexString(SHA256.HashData(packet));
+        ulong hash = XxHash3.HashToUInt64(packet);
         if (!hashes.Add(hash)) return true;
         order.Enqueue(hash);
         if (order.Count > capacity) hashes.Remove(order.Dequeue());

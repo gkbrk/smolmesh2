@@ -1,7 +1,8 @@
 # smolmesh for .NET
 
-A C#/.NET 10 port of the Rust node. It depends on Serilog (logging) from NuGet;
-the test project additionally uses xunit and Microsoft.NET.Test.Sdk.
+A C#/.NET 10 port of the Rust node. It depends on Serilog (logging) and
+System.IO.Hashing (duplicate-packet fingerprints) from NuGet; the test project
+additionally uses xunit and Microsoft.NET.Test.Sdk.
 The Rust implementation remains unchanged.
 
 ## Build and run
@@ -117,8 +118,8 @@ runs. Adapter I/O is stopped before native handles are released.
 - Uses `Task`, async sockets, `System.Threading.Channels`, `System.Text.Json`,
   OS-backed cryptographic randomness, and direct native adapter interop.
 - Keeps first-arrival routing for each announcement timestamp and the
-  three-minute freshness window. Local duplicate fingerprints use SHA-256
-  instead of FxHasher; fingerprints are never transmitted.
+  three-minute freshness window. Local duplicate fingerprints use 64-bit
+  XxHash3 instead of FxHasher; fingerprints are never transmitted.
 - Uses unbounded outgoing peer queues, matching Rust, so transfer bursts do
   not disconnect peers. Slow peers can accumulate buffered packets and memory;
   byte-budgeted backpressure is not implemented yet.
