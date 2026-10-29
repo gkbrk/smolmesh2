@@ -113,7 +113,7 @@ runs. Adapter I/O is stopped before native handles are released.
   command 3.
 - Preserves the actual Rust TCP protocol: Gimli keyfinder/key derivation,
   a continuous Gimli keystream per direction, and a 16-byte per-packet MAC.
-  Despite the root README's description, SPECK is used for node addresses,
+  Despite the Rust README's description, SPECK is used for node addresses,
   not current TCP encryption.
 - Uses `Task`, async sockets, `System.Threading.Channels`, `System.Text.Json`,
   OS-backed cryptographic randomness, and direct native adapter interop.
@@ -145,8 +145,8 @@ For live interoperability with the original implementation, set
 `SMOLMESH_RUST_BINARY` (the Rust tests otherwise do nothing and pass):
 
 ```sh
-cargo build
-SMOLMESH_RUST_BINARY=$PWD/target/debug/smolmesh2 dotnet test dotnet/Smolmesh.Tests
+cargo build --manifest-path rust/Cargo.toml
+SMOLMESH_RUST_BINARY=$PWD/rust/target/debug/smolmesh2 dotnet test dotnet/Smolmesh.Tests
 ```
 
 Tests cover hash vectors, UTF-8 node addressing, keystream boundaries, framing,
