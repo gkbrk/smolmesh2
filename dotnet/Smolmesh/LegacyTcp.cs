@@ -38,8 +38,7 @@ internal static class LegacyTcp
     internal static async Task ListenAsync(TransportConfiguration config, Routing routing,
         ChannelWriter<(byte[] Packet, Peer Peer)> incoming, CancellationToken token)
     {
-        var listener = new TcpListener(IPAddress.Any, config.Port);
-        listener.Start(128);
+        var listener = Listen(config.Port);
         Log.Information("Listening on port {Port}", config.Port);
         var connections = new HashSet<Task>();
         try
@@ -69,6 +68,39 @@ internal static class LegacyTcp
         }
     }
 
+    // Accepts IPv4 and IPv6 on one dual-mode socket, or IPv4 only if the host has no IPv6.
+    internal static TcpListener Listen(int port)
+    {
+        if (Socket.OSSupportsIPv6)
+        {
+            TcpListener? listener = null;
+            try
+            {
+                listener = new TcpListener(IPAddress.IPv6Any, port);
+                listener.Server.DualMode = true;
+                listener.Start(128);
+                return listener;
+            }
+            catch (SocketException ex) when (ex.SocketErrorCode is SocketError.AddressFamilyNotSupported
+                or SocketError.ProtocolNotSupported or SocketError.AddressNotAvailable)
+            {
+                listener?.Stop();
+                Log.Warning("IPv6 unavailable, listening on IPv4 only: {Message}", ex.Message);
+            }
+        }
+        var ipv4 = new TcpListener(IPAddress.Any, port);
+        ipv4.Start(128);
+        return ipv4;
+    }
+
+    // Shows IPv4 peers of a dual-mode listener as a.b.c.d instead of ::ffff:a.b.c.d.
+    internal static string Describe(EndPoint? endPoint) => endPoint switch
+    {
+        IPEndPoint { Address.IsIPv4MappedToIPv6: true } ip => new IPEndPoint(ip.Address.MapToIPv4(), ip.Port).ToString(),
+        null => "unknown peer",
+        _ => endPoint.ToString() ?? "unknown peer",
+    };
+
     internal static async Task RunAsync(TcpClient client, byte[][] keys, bool initiator, Routing routing,
         ChannelWriter<(byte[] Packet, Peer Peer)> incoming, CancellationToken token)
     {
@@ -97,7 +129,7 @@ internal static class LegacyTcp
         }
 
         var peer = new Peer();
-        string remote = client.Client.RemoteEndPoint?.ToString() ?? "unknown peer";
+        string remote = Describe(client.Client.RemoteEndPoint);
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(token);
         routing.Add(peer);
         Log.Information("Authenticated {Direction} connection to {Remote}", initiator ? "outbound" : "inbound", remote);

@@ -48,6 +48,8 @@ the binary can use it to get root, for example by changing `PATH` or setting
 ## Differences from the Rust version
 
 - `host` can also be a hostname or an IPv6 address.
+- `legacy_tcp_listen` accepts IPv4 and IPv6 connections on the same port, or
+  only IPv4 if the host has no IPv6. Rust listens on IPv4 only.
 - Setting the TUN option for another OS is an error. Rust ignores it.
 - If a listener can't bind its port, the node exits with an error. Rust keeps
   retrying.

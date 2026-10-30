@@ -67,6 +67,29 @@ public class LegacyTcpTests
         finally { listener.Stop(); }
     }
 
+    [Fact]
+    public async Task ListenerAcceptsIPv4AndIPv6()
+    {
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var listener = LegacyTcp.Listen(0);
+        try
+        {
+            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            var addresses = new List<IPAddress> { IPAddress.Loopback };
+            if (Socket.OSSupportsIPv6) addresses.Add(IPAddress.IPv6Loopback);
+            foreach (IPAddress address in addresses)
+            {
+                using var client = new TcpClient(address.AddressFamily);
+                await client.ConnectAsync(address, port, stop.Token);
+                using var server = await listener.AcceptTcpClientAsync(stop.Token);
+                var remote = (IPEndPoint)server.Client.RemoteEndPoint!;
+                Assert.Equal(new IPEndPoint(address, ((IPEndPoint)client.Client.LocalEndPoint!).Port).ToString(),
+                    LegacyTcp.Describe(remote));
+            }
+        }
+        finally { listener.Stop(); }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
