@@ -1,5 +1,5 @@
 using System.Buffers.Binary;
-using System.Numerics;
+using System.Runtime.Intrinsics;
 
 namespace Smolmesh;
 
@@ -8,35 +8,40 @@ internal sealed class Gimli
 {
     internal readonly byte[] State = new byte[48];
 
+    // The state is three rows of four little-endian words. Gimli updates the four columns
+    // the same way, so each row is one vector and a round handles all columns at once.
     internal void Permute()
     {
-        Span<uint> s = stackalloc uint[12];
-        for (int i = 0; i < 12; i++) s[i] = BinaryPrimitives.ReadUInt32LittleEndian(State.AsSpan(i * 4));
+        Span<byte> state = State;
+        Vector128<uint> a = Vector128.Create<byte>(state).AsUInt32();
+        Vector128<uint> b = Vector128.Create<byte>(state[16..]).AsUInt32();
+        Vector128<uint> c = Vector128.Create<byte>(state[32..]).AsUInt32();
         for (uint round = 24; round > 0; round--)
         {
-            for (int col = 0; col < 4; col++)
-            {
-                uint x = BitOperations.RotateLeft(s[col], 24);
-                uint y = BitOperations.RotateLeft(s[col + 4], 9);
-                uint z = s[col + 8];
-                s[col + 8] = x ^ (z << 1) ^ ((y & z) << 2);
-                s[col + 4] = y ^ x ^ ((x | z) << 1);
-                s[col] = z ^ y ^ ((x & y) << 3);
-            }
+            Vector128<uint> x = RotateLeft(a, 24);
+            Vector128<uint> y = RotateLeft(b, 9);
+            Vector128<uint> z = c;
+            c = x ^ (z << 1) ^ ((y & z) << 2);
+            b = y ^ x ^ ((x | z) << 1);
+            a = z ^ y ^ ((x & y) << 3);
             if ((round & 3) == 0)
             {
-                (s[0], s[1]) = (s[1], s[0]);
-                (s[2], s[3]) = (s[3], s[2]);
-                s[0] ^= 0x9e377900 | round;
+                // Small swap: words 0<->1 and 2<->3, then add the round constant.
+                a = Vector128.Shuffle(a, Vector128.Create(1u, 0, 3, 2));
+                a ^= Vector128.CreateScalar(0x9e377900 | round);
             }
-            if ((round & 3) == 2)
+            else if ((round & 3) == 2)
             {
-                (s[0], s[2]) = (s[2], s[0]);
-                (s[1], s[3]) = (s[3], s[1]);
+                // Big swap: words 0<->2 and 1<->3.
+                a = Vector128.Shuffle(a, Vector128.Create(2u, 3, 0, 1));
             }
         }
-        for (int i = 0; i < 12; i++) BinaryPrimitives.WriteUInt32LittleEndian(State.AsSpan(i * 4), s[i]);
+        a.AsByte().CopyTo(state);
+        b.AsByte().CopyTo(state[16..]);
+        c.AsByte().CopyTo(state[32..]);
     }
+
+    private static Vector128<uint> RotateLeft(Vector128<uint> v, int bits) => (v << bits) | (v >>> (32 - bits));
 
     internal static byte[] Hash(ReadOnlySpan<byte> input, int length = 32)
     {
