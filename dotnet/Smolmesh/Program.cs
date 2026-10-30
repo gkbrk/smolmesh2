@@ -16,6 +16,12 @@ internal static class Program
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Cancel(); };
         using var sigterm = OperatingSystem.IsWindows() ? null : PosixSignalRegistration.Create(PosixSignal.SIGTERM,
             context => { context.Cancel = true; stop.Cancel(); });
+        Logging.Configure();
+        return await RunAsync(args, stop.Token);
+    }
+
+    internal static async Task<int> RunAsync(string[] args, CancellationToken token)
+    {
         try
         {
             switch (args.FirstOrDefault() ?? "help")
@@ -44,15 +50,14 @@ internal static class Program
                     Console.WriteLine(Protocol.FormatAddress(new IPAddress(bytes)));
                     break;
                 case "meshnode" when args.Length == 2:
-                    Logging.Configure();
-                    await new MeshNode(Configuration.Load(args[1])).RunAsync(stop.Token);
+                    await new MeshNode(Configuration.Load(args[1])).RunAsync(token);
                     break;
                 default:
-                    throw new ArgumentException("Unknown command or missing argument. Use --help.");
+                    throw new ArgumentException($"Unknown command or missing argument: {string.Join(' ', args)}. Use --help.");
             }
             return 0;
         }
-        catch (OperationCanceledException) when (stop.IsCancellationRequested) { return 0; }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { return 0; }
         catch (Exception ex)
         {
             Log.Error("{Message}", ex.Message);
