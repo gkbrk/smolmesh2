@@ -1,4 +1,5 @@
 using Serilog;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
@@ -11,6 +12,9 @@ namespace Smolmesh;
 internal static class LegacyTcp
 {
     internal static readonly TimeSpan IoTimeout = TimeSpan.FromSeconds(30);
+    // Size of the receive buffer, and how much the send loop gathers before one socket write.
+    internal const int BufferSize = 64 * 1024;
+    private const int FrameOverhead = 2 + 16;
 
     internal static async Task ConnectLoopAsync(TransportConfiguration config, Routing routing,
         ChannelWriter<(byte[] Packet, Peer Peer)> incoming, CancellationToken token)
@@ -106,6 +110,9 @@ internal static class LegacyTcp
     {
         client.NoDelay = true;
         NetworkStream stream = client.GetStream();
+        // All reads, the handshake included, go through one buffer: frames that arrive
+        // together with the peer's handshake must not be lost.
+        var reader = new BufferedStream(stream, BufferSize);
         byte[] sendIv = RandomNumberGenerator.GetBytes(16);
         byte[] receiveIv = new byte[16];
         byte[] keyfinder = new byte[16];
@@ -114,15 +121,15 @@ internal static class LegacyTcp
         {
             key = keys[0];
             await WriteHandshakeAsync(stream, key, sendIv, token);
-            await ReadAsync(stream, receiveIv, token);
-            await ReadAsync(stream, keyfinder, token);
+            await ReadAsync(reader, receiveIv, token);
+            await ReadAsync(reader, keyfinder, token);
             if (!CryptographicOperations.FixedTimeEquals(Derive(key, receiveIv, "keyfinder"), keyfinder))
                 throw new IOException("Incorrect keyfinder.");
         }
         else
         {
-            await ReadAsync(stream, receiveIv, token);
-            await ReadAsync(stream, keyfinder, token);
+            await ReadAsync(reader, receiveIv, token);
+            await ReadAsync(reader, keyfinder, token);
             key = keys.FirstOrDefault(k => CryptographicOperations.FixedTimeEquals(Derive(k, receiveIv, "keyfinder"), keyfinder))
                 ?? throw new IOException("Incorrect keyfinder.");
             await WriteHandshakeAsync(stream, key, sendIv, token);
@@ -134,7 +141,7 @@ internal static class LegacyTcp
         routing.Add(peer);
         Log.Information("Authenticated {Direction} connection to {Remote}", initiator ? "outbound" : "inbound", remote);
         Task send = SendAsync(stream, peer, Derive(key, sendIv, "enc_key"), Derive(key, sendIv, "mac_key"), stop.Token);
-        Task receive = ReceiveAsync(stream, peer, incoming, Derive(key, receiveIv, "enc_key"), Derive(key, receiveIv, "mac_key"), stop.Token);
+        Task receive = ReceiveAsync(reader, peer, incoming, Derive(key, receiveIv, "enc_key"), Derive(key, receiveIv, "mac_key"), stop.Token);
         try
         {
             await await Task.WhenAny(send, receive);
@@ -151,30 +158,42 @@ internal static class LegacyTcp
 
     internal static byte[] Derive(byte[] key, byte[] iv, string label) => Gimli.Multi(key, iv, Encoding.UTF8.GetBytes(label));
 
-    private static async Task WriteHandshakeAsync(Stream stream, byte[] key, byte[] iv, CancellationToken token)
-    {
-        await WriteAsync(stream, iv, token);
-        await WriteAsync(stream, Derive(key, iv, "keyfinder"), token);
-    }
+    private static Task WriteHandshakeAsync(Stream stream, byte[] key, byte[] iv, CancellationToken token) =>
+        WriteAsync(stream, (byte[])[.. iv, .. Derive(key, iv, "keyfinder")], token);
 
     internal static byte[] Encode(byte[] packet, byte[] macKey, Keystream keystream)
     {
-        if (packet.Length > ushort.MaxValue) throw new InvalidDataException("Packet exceeds legacy framing limit.");
-        byte[] frame = new byte[2 + packet.Length + 16];
-        BinaryPrimitives.WriteUInt16LittleEndian(frame, (ushort)packet.Length);
-        packet.CopyTo(frame, 2);
-        Gimli.Multi(macKey, packet).CopyTo(frame, 2 + packet.Length);
-        keystream.Apply(frame);
-        return frame;
+        var frame = new ArrayBufferWriter<byte>(packet.Length + FrameOverhead);
+        Encode(packet, macKey, keystream, frame);
+        return frame.WrittenSpan.ToArray();
     }
 
+    internal static void Encode(byte[] packet, byte[] macKey, Keystream keystream, ArrayBufferWriter<byte> output)
+    {
+        if (packet.Length > ushort.MaxValue) throw new InvalidDataException("Packet exceeds legacy framing limit.");
+        int size = packet.Length + FrameOverhead;
+        Span<byte> frame = output.GetSpan(size)[..size];
+        BinaryPrimitives.WriteUInt16LittleEndian(frame, (ushort)packet.Length);
+        packet.CopyTo(frame[2..]);
+        Gimli.Multi(macKey, packet).CopyTo(frame[(2 + packet.Length)..]);
+        keystream.Apply(frame);
+        output.Advance(size);
+    }
+
+    // Encodes every packet already queued, up to BufferSize, and sends them in one write.
+    // The byte stream is the same as sending frames one by one, so peers can't tell.
     private static async Task SendAsync(Stream stream, Peer peer, byte[] encKey, byte[] macKey, CancellationToken token)
     {
         var keystream = new Keystream(encKey);
-        await foreach (byte[] packet in peer.Outgoing.Reader.ReadAllAsync(token))
+        var batch = new ArrayBufferWriter<byte>(BufferSize + ushort.MaxValue + FrameOverhead);
+        ChannelReader<byte[]> reader = peer.Outgoing.Reader;
+        while (await reader.WaitToReadAsync(token))
         {
-            if (packet.Length == 0) continue;
-            await WriteAsync(stream, Encode(packet, macKey, keystream), token);
+            while (batch.WrittenCount < BufferSize && reader.TryRead(out byte[]? packet))
+                if (packet.Length != 0) Encode(packet, macKey, keystream, batch);
+            if (batch.WrittenCount == 0) continue;
+            await WriteAsync(stream, batch.WrittenMemory, token);
+            batch.ResetWrittenCount();
         }
     }
 
