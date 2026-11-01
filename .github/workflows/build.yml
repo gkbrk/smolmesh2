@@ -20,6 +20,7 @@ jobs:
       - if: matrix.rid == 'win-x64'
         run: |
           curl -fsSL https://www.wintun.net/builds/wintun-0.14.1.zip -o "$RUNNER_TEMP/wintun.zip"
+          echo "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51  $RUNNER_TEMP/wintun.zip" | sha256sum -c -
           unzip -j "$RUNNER_TEMP/wintun.zip" wintun/bin/amd64/wintun.dll -d out
       - uses: actions/upload-artifact@v4
         with:
