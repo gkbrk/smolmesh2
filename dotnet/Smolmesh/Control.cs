@@ -7,7 +7,7 @@ namespace Smolmesh;
 /// <summary>Localhost-only JSON control interface: HTTP on 127.0.0.1, one JSON value per response.</summary>
 internal static class Control
 {
-    internal static async Task ListenAsync(int port, Func<object> peers, CancellationToken token)
+    internal static async Task ListenAsync(int port, Func<object> peers, Func<string, Task<string>> trace, CancellationToken token)
     {
         using var listener = new HttpListener();
         listener.Prefixes.Add($"http://127.0.0.1:{port}/");
@@ -18,19 +18,21 @@ internal static class Control
             HttpListenerContext context;
             try { context = await listener.GetContextAsync(); }
             catch (Exception) when (token.IsCancellationRequested) { return; }
-            await RespondAsync(context, peers);
+            await RespondAsync(context, peers, trace);
         }
     }
 
-    private static async Task RespondAsync(HttpListenerContext context, Func<object> peers)
+    private static async Task RespondAsync(HttpListenerContext context, Func<object> peers, Func<string, Task<string>> trace)
     {
         using var response = context.Response;
-        object? result = context.Request is { HttpMethod: "GET" } request ? request.Url?.AbsolutePath switch
+        string? path = context.Request is { HttpMethod: "GET" } request ? request.Url?.AbsolutePath : null;
+        object? result = path switch
         {
             "/status" => "Ok.",
             "/peers" => peers(),
+            _ when path?.StartsWith("/trace/") == true => await trace(Uri.UnescapeDataString(path[7..])),
             _ => null,
-        } : null;
+        };
         response.StatusCode = result is null ? 404 : 200;
         response.ContentType = "application/json";
         byte[] body = JsonSerializer.SerializeToUtf8Bytes(result ?? "Not found.");
@@ -52,5 +54,12 @@ internal static class Control
     {
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
         return await http.GetStringAsync($"http://127.0.0.1:{port}/peers", token);
+    }
+
+    /// <summary>Asks a running node to trace the route to a node name; returns the plain-text hop table.</summary>
+    internal static async Task<string> TraceAsync(int port, string name, CancellationToken token)
+    {
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        return JsonSerializer.Deserialize<string>(await http.GetStringAsync($"http://127.0.0.1:{port}/trace/{Uri.EscapeDataString(name)}", token))!;
     }
 }

@@ -2,6 +2,7 @@ using Serilog;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
@@ -43,7 +44,7 @@ internal sealed class MeshNode
             foreach (string address in config.IPv4Addresses)
                 tasks.Add(AnnounceAsync(2, IPAddress.Parse(address).GetAddressBytes(), stop.Token));
             tasks.Add(ProcessAsync(tun, stop.Token));
-            if (config.ControlPort > 0) tasks.Add(Control.ListenAsync(config.ControlPort, Peers, stop.Token));
+            if (config.ControlPort > 0) tasks.Add(Control.ListenAsync(config.ControlPort, Peers, Trace, stop.Token));
             if (tun is not null)
             {
                 tasks.Add(ReadTunAsync(tun, stop.Token));
@@ -65,6 +66,40 @@ internal sealed class MeshNode
         address = Protocol.FormatAddress(p.Value.Address),
         seconds = (Environment.TickCount64 - p.Value.Tick) / 1000,
     }).OrderBy(p => p.name, StringComparer.Ordinal).ToList();
+
+    private const byte TraceTtl = 32;
+
+    // Probe payload: nonce(8) ttl(1) target(16) source(16). Reply payload: nonce(8) ttl(1) name.
+    private void HandleProbe(byte[] payload)
+    {
+        var target = new IPAddress(payload[9..25]);
+        var source = new IPAddress(payload[25..41]);
+        byte ttl = payload[8];
+        byte[] name = Encoding.UTF8.GetBytes(config.NodeName);
+        routing.Send(source, Protocol.Packet(5, [.. payload[..9], .. name]));
+        if (ttl > 1 && !ourAddresses.Contains(target))
+        {
+            payload[8] = (byte)(ttl - 1);
+            routing.Send(target, Protocol.Packet(4, payload));
+        }
+    }
+
+    private readonly ConcurrentDictionary<ulong, ConcurrentQueue<(string Name, byte Ttl, long Tick)>> traces = new();
+
+    /// <summary>Sends one TTL-limited probe toward a node; every hop replies with its name. Waits 3 seconds, then returns the hop table.</summary>
+    private async Task<string> Trace(string name)
+    {
+        var target = Protocol.NodeAddress(name);
+        ulong nonce = BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8));
+        var replies = traces[nonce] = new();
+        byte[] payload = [.. BitConverter.GetBytes(nonce), TraceTtl, .. target.GetAddressBytes(), .. Protocol.NodeAddress(config.NodeName).GetAddressBytes()];
+        long start = Environment.TickCount64;
+        routing.Send(target, Protocol.Packet(4, payload));
+        await Task.Delay(3000);
+        traces.TryRemove(nonce, out _);
+        string table = string.Concat(replies.OrderBy(r => TraceTtl - r.Ttl).Select(r => $"{TraceTtl - r.Ttl + 1,3}  {r.Name}  {r.Tick - start}ms\n"));
+        return table.Length > 0 ? table : "No replies.\n";
+    }
 
     private async Task AnnounceAsync(byte command, byte[] payload, CancellationToken token)
     {
@@ -115,6 +150,13 @@ internal sealed class MeshNode
                     if (tun is not null) await tun.WriteAsync(payload, token);
                 }
                 else routing.Send(address, packet);
+                return;
+            case 4 when payload.Length == 41:
+                HandleProbe(payload);
+                return;
+            case 5 when payload.Length > 9:
+                if (traces.TryGetValue(BinaryPrimitives.ReadUInt64LittleEndian(payload), out var replies))
+                    replies.Enqueue((StrictUtf8.GetString(payload[9..]), payload[8], Environment.TickCount64));
                 return;
             default:
                 return;

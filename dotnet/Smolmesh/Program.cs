@@ -35,6 +35,7 @@ internal static class Program
                         meshnode <config-file>       Run a mesh node
                         status [config-file]         Check that a running node answers on its control_port (default port if no config)
                         peers [config-file]          List peers heard from: name, IPv6 address, seconds since last announcement
+                        trace <node-name> [config-file]  Show each hop on the route to a node, with round-trip time
                         name-to-ipv6 <node-name>     Derive the node's IPv6 address
                         make-random-ipv4             Generate a random IPv4 address
                         make-random-ipv6             Generate an address with fd00::/16 prefix
@@ -56,6 +57,11 @@ internal static class Program
                         Console.WriteLine($"{"NAME".PadRight(width)}  {"ADDRESS",-39}  LAST SEEN");
                         foreach (var r in rows) Console.WriteLine($"{r.Name.PadRight(width)}  {r.Address,-39}  {r.Seconds}s ago");
                     }
+                    break;
+                case "trace" when args.Length is 2 or 3:
+                    int tracePort = args.Length == 3 ? Configuration.Load(args[2]).ControlPort : new Configuration().ControlPort;
+                    if (tracePort == 0) throw new InvalidOperationException("control_port is 0 (disabled) in the configuration.");
+                    Console.Write(await Control.TraceAsync(tracePort, args[1], token));
                     break;
                 case "name-to-ipv6" when args.Length == 2:
                     Console.WriteLine(Protocol.FormatAddress(Protocol.NodeAddress(args[1])));
