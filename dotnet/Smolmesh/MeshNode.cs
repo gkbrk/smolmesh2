@@ -1,5 +1,6 @@
 using Serilog;
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -15,6 +16,7 @@ internal sealed class MeshNode
     private readonly SeenPackets seen = new(16_384);
     private readonly HashSet<IPAddress> ourAddresses;
     private readonly Channel<(byte[] Packet, Peer Peer)> incoming = Channel.CreateBounded<(byte[], Peer)>(1024);
+    private readonly ConcurrentDictionary<string, (IPAddress Address, long Tick)> peers = new();
     private readonly Channel<IPAddress> routeRequests = Channel.CreateBounded<IPAddress>(1024);
 
     internal MeshNode(Configuration config)
@@ -41,7 +43,7 @@ internal sealed class MeshNode
             foreach (string address in config.IPv4Addresses)
                 tasks.Add(AnnounceAsync(2, IPAddress.Parse(address).GetAddressBytes(), stop.Token));
             tasks.Add(ProcessAsync(tun, stop.Token));
-            if (config.ControlPort > 0) tasks.Add(Control.ListenAsync(config.ControlPort, stop.Token));
+            if (config.ControlPort > 0) tasks.Add(Control.ListenAsync(config.ControlPort, Peers, stop.Token));
             if (tun is not null)
             {
                 tasks.Add(ReadTunAsync(tun, stop.Token));
@@ -56,6 +58,13 @@ internal sealed class MeshNode
             catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
         }
     }
+
+    private object Peers() => peers.Where(p => !ourAddresses.Contains(p.Value.Address)).Select(p => new
+    {
+        name = p.Key,
+        address = Protocol.FormatAddress(p.Value.Address),
+        seconds = (Environment.TickCount64 - p.Value.Tick) / 1000,
+    }).OrderBy(p => p.name, StringComparer.Ordinal).ToList();
 
     private async Task AnnounceAsync(byte command, byte[] payload, CancellationToken token)
     {
@@ -90,6 +99,7 @@ internal sealed class MeshNode
                 }
                 catch (DecoderFallbackException) { return; }
                 // JSON quoting keeps peer-controlled names on one log line.
+                peers[nodeName] = (address, Environment.TickCount64);
                 Log.Information("Received node tracer: {NodeName:l} ({Address})", JsonSerializer.Serialize(nodeName), Protocol.FormatAddress(address));
                 break;
             case 1 when payload.Length == 16:

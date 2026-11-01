@@ -17,8 +17,9 @@ public class ControlTests
     {
         int port = FreePort();
         using var stop = new CancellationTokenSource();
-        Task server = Control.ListenAsync(port, stop.Token);
+        Task server = Control.ListenAsync(port, () => new[] { new { name = "a" } }, stop.Token);
         Assert.Equal("Ok.", await Control.StatusAsync(port, default));
+        Assert.Equal("[{\"name\":\"a\"}]", await Control.PeersAsync(port, default));
         using var http = new HttpClient();
         Assert.Equal(HttpStatusCode.NotFound, (await http.GetAsync($"http://127.0.0.1:{port}/nope")).StatusCode);
         await stop.CancelAsync();

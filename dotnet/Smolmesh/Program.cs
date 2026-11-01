@@ -34,6 +34,7 @@ internal static class Program
 
                         meshnode <config-file>       Run a mesh node
                         status [config-file]         Check that a running node answers on its control_port (default port if no config)
+                        peers [config-file]          List peers heard from: name, IPv6 address, seconds since last announcement
                         name-to-ipv6 <node-name>     Derive the node's IPv6 address
                         make-random-ipv4             Generate a random IPv4 address
                         make-random-ipv6             Generate an address with fd00::/16 prefix
@@ -43,6 +44,18 @@ internal static class Program
                     int port = args.Length == 2 ? Configuration.Load(args[1]).ControlPort : new Configuration().ControlPort;
                     if (port == 0) throw new InvalidOperationException("control_port is 0 (disabled) in the configuration.");
                     Console.WriteLine(await Control.StatusAsync(port, token));
+                    break;
+                case "peers" when args.Length <= 2:
+                    int peersPort = args.Length == 2 ? Configuration.Load(args[1]).ControlPort : new Configuration().ControlPort;
+                    if (peersPort == 0) throw new InvalidOperationException("control_port is 0 (disabled) in the configuration.");
+                    using (var doc = System.Text.Json.JsonDocument.Parse(await Control.PeersAsync(peersPort, token)))
+                    {
+                        var rows = doc.RootElement.EnumerateArray().Select(p => (Name: p.GetProperty("name").GetString()!,
+                            Address: p.GetProperty("address").GetString()!, Seconds: p.GetProperty("seconds").GetInt64())).ToList();
+                        int width = rows.Select(r => r.Name.Length).Prepend(4).Max();
+                        Console.WriteLine($"{"NAME".PadRight(width)}  {"ADDRESS",-39}  LAST SEEN");
+                        foreach (var r in rows) Console.WriteLine($"{r.Name.PadRight(width)}  {r.Address,-39}  {r.Seconds}s ago");
+                    }
                     break;
                 case "name-to-ipv6" when args.Length == 2:
                     Console.WriteLine(Protocol.FormatAddress(Protocol.NodeAddress(args[1])));
