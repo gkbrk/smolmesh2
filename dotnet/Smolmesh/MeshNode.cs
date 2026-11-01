@@ -41,6 +41,7 @@ internal sealed class MeshNode
             foreach (string address in config.IPv4Addresses)
                 tasks.Add(AnnounceAsync(2, IPAddress.Parse(address).GetAddressBytes(), stop.Token));
             tasks.Add(ProcessAsync(tun, stop.Token));
+            if (config.ControlPort > 0) tasks.Add(Control.ListenAsync(config.ControlPort, stop.Token));
             if (tun is not null)
             {
                 tasks.Add(ReadTunAsync(tun, stop.Token));

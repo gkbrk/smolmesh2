@@ -74,7 +74,7 @@ public class RustInteropTests
         var rustTransport = rustListens
             ? new TransportConfiguration { Type = "legacy_tcp_listen", Port = port, Keys = ["wrong", "interop-secret"] }
             : new TransportConfiguration { Type = "legacy_tcp_connect", Port = port, Host = "127.0.0.1", Key = "interop-secret" };
-        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(new Configuration { NodeName = "rust-interop", Transports = [rustTransport] }));
+        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(new Configuration { NodeName = "rust-interop", ControlPort = 0, Transports = [rustTransport] }));
         var incoming = Channel.CreateUnbounded<(byte[] Packet, Peer Peer)>();
         var routing = new Routing();
         Task? transport = null;

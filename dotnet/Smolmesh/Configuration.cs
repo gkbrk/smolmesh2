@@ -13,6 +13,7 @@ internal sealed class Configuration
     [JsonPropertyName("linux_tuntap")] public bool LinuxTun { get; set; }
     [JsonPropertyName("macos_tuntap")] public bool MacTun { get; set; }
     [JsonPropertyName("windows_tuntap")] public bool WindowsTun { get; set; }
+    [JsonPropertyName("control_port")] public int ControlPort { get; set; } = 57960;
     [JsonPropertyName("transports")] public TransportConfiguration[] Transports { get; set; } = [];
 
     internal static Configuration Load(string path)
@@ -29,6 +30,7 @@ internal sealed class Configuration
             throw new InvalidDataException("node_name exceeds the legacy packet size limit.");
         if (WindowsTun && NodeName.Length > 119)
             throw new InvalidDataException("Windows adapter names cannot exceed 128 characters including the smolmesh- prefix.");
+        if (ControlPort is < 0 or > 65535) throw new InvalidDataException("control_port must be between 0 (disabled) and 65535.");
         if (IPv4Addresses is null || Transports is null) throw new InvalidDataException("Address and transport arrays cannot be null.");
         foreach (string address in IPv4Addresses)
             if (!IPAddress.TryParse(address, out var ip) || ip.AddressFamily != AddressFamily.InterNetwork)

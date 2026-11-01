@@ -12,13 +12,13 @@ public class MeshNodeTests
         Assert.Throws<InvalidDataException>(() => new MeshNode(new Configuration()));
         Assert.Throws<InvalidDataException>(() => new MeshNode(new Configuration { NodeName = "test", IPv4Addresses = ["not-an-ip"] }));
         Assert.Throws<InvalidDataException>(() => new MeshNode(new Configuration { NodeName = "test", IPv4Addresses = null! }));
-        _ = new MeshNode(new Configuration { NodeName = "test" });
+        _ = new MeshNode(new Configuration { NodeName = "test", ControlPort = 0 });
     }
 
     [Fact]
     public async Task MalformedMeshPacketsDoNotReachTun()
     {
-        var node = new MeshNode(new Configuration { NodeName = "test" });
+        var node = new MeshNode(new Configuration { NodeName = "test", ControlPort = 0 });
         var peer = new Peer();
         var tun = new FakeTun();
         await node.ProcessPacketAsync([], peer, tun, default);
@@ -41,7 +41,7 @@ public class MeshNodeTests
     [Fact]
     public async Task TracerLogsIncludeNamesAndAddressesButSkipDuplicatesAndInvalidPackets()
     {
-        var node = new MeshNode(new Configuration { NodeName = "local" });
+        var node = new MeshNode(new Configuration { NodeName = "local", ControlPort = 0 });
         var peer = new Peer();
         using var output = new StringWriter();
         Logging.Configure();
@@ -79,7 +79,7 @@ public class MeshNodeTests
         int port = FreePort();
         var config = new Configuration
         {
-            NodeName = "node-under-test",
+            NodeName = "node-under-test", ControlPort = 0,
             Transports = [new() { Type = "legacy_tcp_listen", Port = port, Keys = ["mesh-test"] }]
         };
         Task node = new MeshNode(config).RunAsync(stop.Token);

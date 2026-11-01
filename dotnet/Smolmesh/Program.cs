@@ -28,14 +28,21 @@ internal static class Program
             {
                 case "help":
                 case "--help":
+                case "status" when args.Contains("--help"):
                     Console.WriteLine("""
                         smolmesh - peer-to-peer mesh VPN (.NET)
 
                         meshnode <config-file>       Run a mesh node
+                        status [config-file]         Check that a running node answers on its control_port (default port if no config)
                         name-to-ipv6 <node-name>     Derive the node's IPv6 address
                         make-random-ipv4             Generate a random IPv4 address
                         make-random-ipv6             Generate an address with fd00::/16 prefix
                         """);
+                    break;
+                case "status" when args.Length <= 2 && !args.Contains("--help"):
+                    int port = args.Length == 2 ? Configuration.Load(args[1]).ControlPort : new Configuration().ControlPort;
+                    if (port == 0) throw new InvalidOperationException("control_port is 0 (disabled) in the configuration.");
+                    Console.WriteLine(await Control.StatusAsync(port, token));
                     break;
                 case "name-to-ipv6" when args.Length == 2:
                     Console.WriteLine(Protocol.FormatAddress(Protocol.NodeAddress(args[1])));
