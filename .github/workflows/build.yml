@@ -26,3 +26,24 @@ jobs:
         with:
           name: smolmesh-${{ matrix.rid }}
           path: out/
+
+  release:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - run: |
+          cd artifacts
+          for d in smolmesh-*; do (cd "$d" && chmod +x smolmesh* && zip -qr "../$d.zip" .); done
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release delete latest --cleanup-tag --yes || true
+          gh release create latest artifacts/*.zip --prerelease --target "$GITHUB_SHA" \
+            --title "Latest build" --notes "Automatic build of ${GITHUB_SHA::7}"
