@@ -7,6 +7,35 @@ using Xunit;
 public class MeshNodeTests
 {
     [Fact]
+    public async Task IntermediateNodeForwardsTraceRepliesToOrigin()
+    {
+        var node = new MeshNode(new Configuration { NodeName = "middle", ControlPort = 0 });
+        var routing = (Routing)typeof(MeshNode).GetField("routing", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(node)!;
+        var originPeer = new Peer();
+        var destinationPeer = new Peer();
+        routing.Add(originPeer);
+        routing.Add(destinationPeer);
+        var origin = Protocol.NodeAddress("origin");
+        var destination = Protocol.NodeAddress("destination");
+        routing.Learn(1, origin, originPeer);
+        routing.Learn(1, destination, destinationPeer);
+        byte[] nonce = BitConverter.GetBytes(123UL);
+        byte[] probe = Protocol.Packet(4, [.. nonce, 32, .. destination.GetAddressBytes(), .. origin.GetAddressBytes()]);
+        await node.ProcessPacketAsync(probe, originPeer, null, default);
+        Assert.True(originPeer.Outgoing.Reader.TryRead(out var middleReply));
+        Assert.Equal(Protocol.Packet(5, [.. nonce, 32, .. origin.GetAddressBytes(), .. "middle"u8], BitConverter.ToUInt64(middleReply!)), middleReply);
+        Assert.True(destinationPeer.Outgoing.Reader.TryRead(out _)); // forwarded probe
+
+        byte[] reply = Protocol.Packet(5, [.. nonce, 31, .. origin.GetAddressBytes(), .. "destination"u8]);
+        await node.ProcessPacketAsync(reply, destinationPeer, null, default);
+        Assert.True(originPeer.Outgoing.Reader.TryRead(out var forwarded));
+        Assert.Equal(reply, forwarded);
+
+        await node.ProcessPacketAsync(Protocol.Packet(5, [.. BitConverter.GetBytes(456UL), 31, .. Protocol.NodeAddress("middle").GetAddressBytes(), .. "unknown"u8]), destinationPeer, null, default);
+        Assert.False(originPeer.Outgoing.Reader.TryRead(out _));
+    }
+
+    [Fact]
     public void ConstructorValidatesConfiguration()
     {
         Assert.Throws<InvalidDataException>(() => new MeshNode(new Configuration()));

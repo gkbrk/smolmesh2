@@ -69,14 +69,14 @@ internal sealed class MeshNode
 
     private const byte TraceTtl = 32;
 
-    // Probe payload: nonce(8) ttl(1) target(16) source(16). Reply payload: nonce(8) ttl(1) name.
+    // Probe: nonce(8) ttl(1) target(16) source(16). Reply: nonce(8) ttl(1) source(16) name.
     private void HandleProbe(byte[] payload)
     {
         var target = new IPAddress(payload[9..25]);
         var source = new IPAddress(payload[25..41]);
         byte ttl = payload[8];
         byte[] name = Encoding.UTF8.GetBytes(config.NodeName);
-        routing.Send(source, Protocol.Packet(5, [.. payload[..9], .. name]));
+        routing.Send(source, Protocol.Packet(5, [.. payload[..9], .. payload[25..41], .. name]));
         if (ttl > 1 && !ourAddresses.Contains(target))
         {
             payload[8] = (byte)(ttl - 1);
@@ -155,9 +155,19 @@ internal sealed class MeshNode
             case 4 when payload.Length == 41:
                 HandleProbe(payload);
                 return;
-            case 5 when payload.Length > 9:
-                if (traces.TryGetValue(BinaryPrimitives.ReadUInt64LittleEndian(payload), out var replies))
-                    replies.Enqueue((StrictUtf8.GetString(payload[9..]), payload[8], Environment.TickCount64));
+            case 5 when payload.Length > 25:
+                var source = new IPAddress(payload[9..25]);
+                if (!ourAddresses.Contains(source))
+                {
+                    routing.Send(source, packet);
+                    return;
+                }
+                ulong nonce = BinaryPrimitives.ReadUInt64LittleEndian(payload);
+                if (traces.TryGetValue(nonce, out var replies))
+                {
+                    try { replies.Enqueue((StrictUtf8.GetString(payload[25..]), payload[8], Environment.TickCount64)); }
+                    catch (DecoderFallbackException) { }
+                }
                 return;
             default:
                 return;
