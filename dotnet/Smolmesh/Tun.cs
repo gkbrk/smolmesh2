@@ -23,7 +23,7 @@ internal static class Tun
             IPAddress[] addresses = [nodeAddress, .. config.IPv4Addresses.Select(IPAddress.Parse)];
             if (tun is UnixTun unix) await unix.ConfigureAsync(addresses, token);
             else if (tun is WindowsTun windows) await windows.ConfigureAsync(addresses, token);
-            return tun;
+            return config.MacTun ? new MacTunLoopback(tun, nodeAddress) : tun;
         }
         catch
         {

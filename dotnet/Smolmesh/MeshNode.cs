@@ -90,6 +90,7 @@ internal sealed class MeshNode
     private async Task<string> Trace(string name)
     {
         var target = Protocol.NodeAddress(name);
+        if (ourAddresses.Contains(target)) return $"  1  {config.NodeName}  0ms\n";
         ulong nonce = BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8));
         var replies = traces[nonce] = new();
         byte[] payload = [.. BitConverter.GetBytes(nonce), TraceTtl, .. target.GetAddressBytes(), .. Protocol.NodeAddress(config.NodeName).GetAddressBytes()];
@@ -161,9 +162,11 @@ internal sealed class MeshNode
             default:
                 return;
         }
+        // A tracer of our own comes back through the mesh; it is not a peer.
+        if (ourAddresses.Contains(address)) return;
         routing.Learn(timestamp, address, peer);
         routing.Broadcast(packet);
-        if (tun is not null && !ourAddresses.Contains(address)) routeRequests.Writer.TryWrite(address);
+        if (tun is not null) routeRequests.Writer.TryWrite(address);
     }
 
     private async Task ReadTunAsync(ITun tun, CancellationToken token)
