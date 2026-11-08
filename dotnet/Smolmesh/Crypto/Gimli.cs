@@ -1,7 +1,7 @@
 using System.Buffers.Binary;
 using System.Runtime.Intrinsics;
 
-namespace Smolmesh;
+namespace Smolmesh.Crypto;
 
 // These are the legacy protocol's constructions, not standard Gimli AEAD.
 internal sealed class Gimli
@@ -85,32 +85,6 @@ internal sealed class Gimli
             int count = Math.Min(16, input.Length - offset);
             for (int i = 0; i < count; i++) State[i] ^= input[offset + i];
             Permute();
-        }
-    }
-}
-
-internal sealed class Keystream
-{
-    private readonly Gimli state = new();
-    private int position;
-
-    internal Keystream(byte[] key)
-    {
-        BinaryPrimitives.WriteUInt64LittleEndian(state.State, (ulong)key.Length);
-        state.Permute();
-        state.Absorb(key);
-    }
-
-    internal void Apply(Span<byte> data)
-    {
-        for (int i = 0; i < data.Length; i++)
-        {
-            data[i] ^= state.State[position++];
-            if (position == 16)
-            {
-                state.Permute();
-                position = 0;
-            }
         }
     }
 }

@@ -1,4 +1,5 @@
 using Serilog;
+using Smolmesh.Crypto;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Net;
@@ -161,14 +162,14 @@ internal static class LegacyTcp
     private static Task WriteHandshakeAsync(Stream stream, byte[] key, byte[] iv, CancellationToken token) =>
         WriteAsync(stream, (byte[])[.. iv, .. Derive(key, iv, "keyfinder")], token);
 
-    internal static byte[] Encode(byte[] packet, byte[] macKey, Keystream keystream)
+    internal static byte[] Encode(byte[] packet, byte[] macKey, GimliKeystream keystream)
     {
         var frame = new ArrayBufferWriter<byte>(packet.Length + FrameOverhead);
         Encode(packet, macKey, keystream, frame);
         return frame.WrittenSpan.ToArray();
     }
 
-    internal static void Encode(byte[] packet, byte[] macKey, Keystream keystream, ArrayBufferWriter<byte> output)
+    internal static void Encode(byte[] packet, byte[] macKey, GimliKeystream keystream, ArrayBufferWriter<byte> output)
     {
         if (packet.Length > ushort.MaxValue) throw new InvalidDataException("Packet exceeds legacy framing limit.");
         int size = packet.Length + FrameOverhead;
@@ -184,7 +185,7 @@ internal static class LegacyTcp
     // The byte stream is the same as sending frames one by one, so peers can't tell.
     private static async Task SendAsync(Stream stream, Peer peer, byte[] encKey, byte[] macKey, CancellationToken token)
     {
-        var keystream = new Keystream(encKey);
+        var keystream = new GimliKeystream(encKey);
         var batch = new ArrayBufferWriter<byte>(BufferSize + ushort.MaxValue + FrameOverhead);
         ChannelReader<byte[]> reader = peer.Outgoing.Reader;
         while (await reader.WaitToReadAsync(token))
@@ -200,7 +201,7 @@ internal static class LegacyTcp
     private static async Task ReceiveAsync(Stream stream, Peer peer, ChannelWriter<(byte[] Packet, Peer Peer)> incoming,
         byte[] encKey, byte[] macKey, CancellationToken token)
     {
-        var keystream = new Keystream(encKey);
+        var keystream = new GimliKeystream(encKey);
         byte[] length = new byte[2];
         while (true)
         {

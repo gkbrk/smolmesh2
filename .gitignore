@@ -10,3 +10,4 @@ target/
 dotnet/**/bin/
 dotnet/**/obj/
 dotnet/publish/
+BenchmarkDotNet.Artifacts/

@@ -85,3 +85,33 @@ SMOLMESH_RUST_BINARY=$PWD/rust/target/debug/smolmesh2 dotnet test dotnet/Smolmes
 
 The tests don't create real network interfaces, so TUN setup is only tested by
 running a node as root.
+
+## Crypto benchmarks
+
+```sh
+dotnet run --project dotnet/Smolmesh.Benchmarks -c Release -- --filter '*'
+```
+
+BenchmarkDotNet runs a short job at 64, 256, and 1500 bytes, with allocation
+measurements. `PacketBenchmarks` compares the existing Gimli MAC + keystream
+operations (including the encrypted length prefix) against Bouncy Castle's
+standardized Ascon-AEAD128, including per-packet initialization and tag generation
+(no AAD or length prefix). Both reuse output buffers; session key derivation is
+excluded. This measures encryption/tag generation, not receive-side verification.
+
+`DuplexBenchmarks` compares persistent-state encryption block loops, excluding
+initialization, record framing, padding, and tags. Both process 16-byte blocks,
+so the 1500-byte case processes 1504 bytes. This estimates steady-state throughput
+only: it is **not** an implementation of a secure stateful record protocol.
+Ascon uses the library's streaming API; Gimli uses the existing SIMD permutation
+with an experimental absorb-and-output loop. No production crypto is changed.
+
+API checks run before benchmarking; run just those with `-- --verify`.
+
+Both Ascon implementations are managed C#: Bouncy Castle does not call native
+C/C++ here. `AsconSimplePacket` and `AsconSimpleDuplexBlocks` use `AsconSpec.cs`,
+a small scalar implementation based on NIST SP 800-232 using `ulong`, XOR, AND,
+and `BitOperations.RotateRight`. It supports encryption with associated data,
+but not decryption, and is benchmark-only, not audited production crypto. Before
+benchmarking, ciphertext and tags are compared against Bouncy Castle across 140
+message/AAD boundary cases, and persistent block output is compared too.

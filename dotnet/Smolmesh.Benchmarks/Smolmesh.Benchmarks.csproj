@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="BenchmarkDotNet" Version="0.15.8" />
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.7.0" />
+    <Compile Include="../Smolmesh/Crypto/Gimli.cs" Link="Crypto/Gimli.cs" />
+    <Compile Include="../Smolmesh/Crypto/GimliKeystream.cs" Link="Crypto/GimliKeystream.cs" />
+  </ItemGroup>
+</Project>

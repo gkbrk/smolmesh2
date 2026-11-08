@@ -1,4 +1,4 @@
-using Smolmesh;
+using Smolmesh.Crypto;
 using Xunit;
 
 public class CryptoTests
@@ -17,8 +17,8 @@ public class CryptoTests
     {
         byte[] key = Enumerable.Range(0, 16).Select(i => (byte)i).ToArray();
         byte[] whole = new byte[511], chunks = new byte[511];
-        new Keystream(key).Apply(whole);
-        var stream = new Keystream(key);
+        new GimliKeystream(key).Apply(whole);
+        var stream = new GimliKeystream(key);
         stream.Apply(chunks.AsSpan(0, 1));
         stream.Apply(chunks.AsSpan(1, 16));
         stream.Apply(chunks.AsSpan(17));

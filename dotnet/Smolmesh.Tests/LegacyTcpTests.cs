@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Threading.Channels;
 using Smolmesh;
+using Smolmesh.Crypto;
 using Xunit;
 
 public class LegacyTcpTests
@@ -13,12 +14,12 @@ public class LegacyTcpTests
     {
         byte[] key = Enumerable.Range(0, 16).Select(i => (byte)i).ToArray();
         byte[] packet = "payload"u8.ToArray();
-        byte[] frame = LegacyTcp.Encode(packet, key, new Keystream(key));
-        new Keystream(key).Apply(frame);
+        byte[] frame = LegacyTcp.Encode(packet, key, new GimliKeystream(key));
+        new GimliKeystream(key).Apply(frame);
         Assert.Equal((ushort)packet.Length, BinaryPrimitives.ReadUInt16LittleEndian(frame));
         Assert.Equal(packet, frame.AsSpan(2, packet.Length).ToArray());
         Assert.Equal(Gimli.Multi(key, packet), frame.AsSpan(2 + packet.Length).ToArray());
-        Assert.Throws<InvalidDataException>(() => LegacyTcp.Encode(new byte[65536], key, new Keystream(key)));
+        Assert.Throws<InvalidDataException>(() => LegacyTcp.Encode(new byte[65536], key, new GimliKeystream(key)));
     }
 
     [Fact]
@@ -114,7 +115,7 @@ public class LegacyTcpTests
             {
                 await stream.ReadExactlyAsync(new byte[32], stop.Token);
                 byte[] frame = LegacyTcp.Encode("data"u8.ToArray(), LegacyTcp.Derive(key, iv, "mac_key"),
-                    new Keystream(LegacyTcp.Derive(key, iv, "enc_key")));
+                    new GimliKeystream(LegacyTcp.Derive(key, iv, "enc_key")));
                 frame[^1] ^= 1;
                 await stream.WriteAsync(frame, stop.Token);
             }
