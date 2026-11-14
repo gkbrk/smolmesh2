@@ -45,5 +45,5 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           gh release delete latest --cleanup-tag --yes || true
-          gh release create latest artifacts/*.zip --prerelease --target "$GITHUB_SHA" \
+          gh release create latest artifacts/*.zip --latest --target "$GITHUB_SHA" \
             --title "Latest build" --notes "Automatic build of ${GITHUB_SHA::7}"
