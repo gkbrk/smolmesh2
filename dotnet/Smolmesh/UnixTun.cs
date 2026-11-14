@@ -1,4 +1,5 @@
 using Serilog;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.ComponentModel;
 using System.Net;
@@ -12,6 +13,7 @@ internal sealed class UnixTun : ITun
     private readonly int fd;
     private readonly bool mac;
     private readonly string name;
+    private readonly byte[] readBuffer = new byte[65539];
     private bool disposed;
 
     private UnixTun(int fd, bool mac, string name) => (this.fd, this.mac, this.name) = (fd, mac, name);
@@ -87,54 +89,81 @@ internal sealed class UnixTun : ITun
             : Tun.CommandAsync("ip", token, v4 ? "-4" : "-6", "route", "replace", $"{address}/{(v4 ? 32 : 128)}", "dev", name);
     }
 
-    public Task<byte[]> ReadAsync(CancellationToken token) => Task.Run(() =>
+    // One read at a time: the buffer is shared between calls.
+    public async Task<byte[]> ReadAsync(CancellationToken token)
     {
-        byte[] buffer = new byte[65539];
+        token.ThrowIfCancellationRequested();
+        // Under load a packet is usually waiting, which saves the poll and the thread hop.
+        return TryRead() ?? await Task.Run(() =>
+        {
+            while (true)
+            {
+                token.ThrowIfCancellationRequested();
+                var poll = new Native.PollFd { Fd = fd, Events = 1 };
+                int ready = Native.poll(ref poll, 1, 200);
+                if (ready < 0)
+                {
+                    if (Marshal.GetLastPInvokeError() == 4) continue; // EINTR
+                    throw Error("TUN poll");
+                }
+                if (ready == 0) continue;
+                if ((poll.ReturnedEvents & 0x38) != 0) throw new IOException("TUN descriptor closed or failed.");
+                if (TryRead() is { } packet) return packet;
+            }
+        }, token);
+    }
+
+    /// <summary>Returns null when no packet is waiting.</summary>
+    private byte[]? TryRead()
+    {
+        int skip = mac ? 4 : 0;
         while (true)
         {
-            token.ThrowIfCancellationRequested();
-            var poll = new Native.PollFd { Fd = fd, Events = 1 };
-            int ready = Native.poll(ref poll, 1, 200);
-            if (ready < 0)
-            {
-                if (Marshal.GetLastPInvokeError() == 4) continue; // EINTR
-                throw Error("TUN poll");
-            }
-            if (ready == 0) continue;
-            if ((poll.ReturnedEvents & 0x38) != 0) throw new IOException("TUN descriptor closed or failed.");
-            nint count = Native.read(fd, buffer, (nuint)buffer.Length);
+            nint count = Native.read(fd, readBuffer, (nuint)readBuffer.Length);
             if (count < 0)
             {
-                if (WouldBlock()) continue;
+                if (WouldBlock()) return null;
                 throw Error("TUN read");
             }
             if (count == 0) throw new EndOfStreamException("TUN closed.");
-            int skip = mac ? 4 : 0;
-            if (count <= skip) continue;
-            return buffer[skip..(int)count];
+            if (count > skip) return readBuffer[skip..(int)count];
         }
-    }, token);
+    }
 
     public async Task WriteAsync(byte[] packet, CancellationToken token)
     {
-        byte[] buffer = packet;
-        if (mac)
+        if (!mac)
         {
-            if (Protocol.Destination(packet) is null) return;
-            buffer = new byte[4 + packet.Length];
+            await WriteAsync(packet, packet.Length, token);
+            return;
+        }
+        if (Protocol.Destination(packet) is null) return;
+        // utun expects the address family ahead of each packet.
+        int length = 4 + packet.Length;
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(length);
+        try
+        {
             BinaryPrimitives.WriteUInt32BigEndian(buffer, packet[0] >> 4 == 4 ? 2u : 30u);
             packet.CopyTo(buffer, 4);
+            await WriteAsync(buffer, length, token);
         }
+        finally { ArrayPool<byte>.Shared.Return(buffer); }
+    }
+
+    private async Task WriteAsync(byte[] buffer, int length, CancellationToken token)
+    {
         while (true)
         {
             token.ThrowIfCancellationRequested();
-            nint count = Native.write(fd, buffer, (nuint)buffer.Length);
-            if (count == buffer.Length) return;
+            nint count = Native.write(fd, buffer, (nuint)length);
+            if (count == length) return;
             if (count < 0 && WouldBlock())
             {
                 await Task.Delay(2, token);
                 continue;
             }
+            // ENOBUFS: the interface queue is full, so the packet is dropped like any other congestion loss.
+            if (count < 0 && Marshal.GetLastPInvokeError() == (mac ? 55 : 105)) return;
             if (count < 0) throw Error("TUN write");
             throw new IOException("Partial TUN packet write.");
         }

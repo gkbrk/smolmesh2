@@ -47,7 +47,8 @@ internal sealed class MeshNode
             if (config.ControlPort > 0) tasks.Add(Control.ListenAsync(config.ControlPort, Peers, Trace, stop.Token));
             if (tun is not null)
             {
-                tasks.Add(ReadTunAsync(tun, stop.Token));
+                // Reads complete synchronously while packets are waiting, so a busy TUN must not hold up startup.
+                tasks.Add(Task.Run(() => ReadTunAsync(tun, stop.Token)));
                 tasks.Add(AddRoutesAsync(tun, stop.Token));
             }
             await await Task.WhenAny(tasks);
