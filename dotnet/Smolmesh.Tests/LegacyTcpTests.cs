@@ -10,16 +10,27 @@ using Xunit;
 public class LegacyTcpTests
 {
     [Fact]
-    public void FramingEncryptsLengthPayloadAndMac()
+    public void FramingEncryptsLengthPayloadAndTag()
     {
         byte[] key = Enumerable.Range(0, 16).Select(i => (byte)i).ToArray();
         byte[] packet = "payload"u8.ToArray();
-        byte[] frame = LegacyTcp.Encode(packet, key, new GimliKeystream(key));
-        new GimliKeystream(key).Apply(frame);
+        byte[] frame = LegacyTcp.Encode(packet, new AsconStream(key));
+        Assert.Equal(2 + packet.Length + AsconStream.TagSize, frame.Length);
+        Assert.NotEqual(packet, frame.AsSpan(2, packet.Length).ToArray());
+        Assert.True(new AsconStream(key).Open(frame.AsSpan(0, 2 + packet.Length), frame.AsSpan(2 + packet.Length)));
         Assert.Equal((ushort)packet.Length, BinaryPrimitives.ReadUInt16LittleEndian(frame));
         Assert.Equal(packet, frame.AsSpan(2, packet.Length).ToArray());
-        Assert.Equal(Gimli.Multi(key, packet), frame.AsSpan(2 + packet.Length).ToArray());
-        Assert.Throws<InvalidDataException>(() => LegacyTcp.Encode(new byte[65536], key, new GimliKeystream(key)));
+        Assert.Throws<InvalidDataException>(() => LegacyTcp.Encode(new byte[65536], new AsconStream(key)));
+    }
+
+    [Fact]
+    public void StreamKeysDependOnDirectionAndBothIvs()
+    {
+        byte[] key = "secret"u8.ToArray(), a = new byte[16], b = new byte[16], c = new byte[16];
+        b[0] = 1;
+        c[0] = 2;
+        Assert.NotEqual(LegacyTcp.StreamKey(key, a, b), LegacyTcp.StreamKey(key, b, a));
+        Assert.NotEqual(LegacyTcp.StreamKey(key, a, b), LegacyTcp.StreamKey(key, a, c));
     }
 
     [Fact]
@@ -113,9 +124,9 @@ public class LegacyTcpTests
             await stream.WriteAsync(LegacyTcp.Derive(key, iv, "keyfinder"), stop.Token);
             if (tamper)
             {
-                await stream.ReadExactlyAsync(new byte[32], stop.Token);
-                byte[] frame = LegacyTcp.Encode("data"u8.ToArray(), LegacyTcp.Derive(key, iv, "mac_key"),
-                    new GimliKeystream(LegacyTcp.Derive(key, iv, "enc_key")));
+                byte[] handshake = new byte[32];
+                await stream.ReadExactlyAsync(handshake, stop.Token);
+                byte[] frame = LegacyTcp.Encode("data"u8.ToArray(), new AsconStream(LegacyTcp.StreamKey(key, iv, handshake[..16])));
                 frame[^1] ^= 1;
                 await stream.WriteAsync(frame, stop.Token);
             }
