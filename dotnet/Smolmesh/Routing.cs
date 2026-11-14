@@ -5,12 +5,22 @@ namespace Smolmesh;
 
 internal sealed class Peer
 {
-    // Match Rust: transfer bursts must not disconnect an otherwise healthy peer.
-    // A slow peer can accumulate packets; byte-budgeted backpressure is future work.
-    internal readonly Channel<byte[]> Outgoing = Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions
+    // About 6 MB of tunnel traffic, more than the bandwidth-delay product of the links we run on.
+    internal const int QueueLimit = 4096;
+
+    // A full queue drops its oldest packet instead of blocking or disconnecting: memory and
+    // delay stay bounded, and inner TCP connections see the loss and slow down.
+    internal readonly Channel<byte[]> Outgoing;
+
+    private long dropped;
+
+    internal Peer() => Outgoing = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(QueueLimit)
     {
-        SingleReader = true
-    });
+        SingleReader = true,
+        FullMode = BoundedChannelFullMode.DropOldest
+    }, _ => Interlocked.Increment(ref dropped));
+
+    internal long Dropped => Interlocked.Read(ref dropped);
 
     internal bool Send(byte[] packet) => Outgoing.Writer.TryWrite(packet);
 }

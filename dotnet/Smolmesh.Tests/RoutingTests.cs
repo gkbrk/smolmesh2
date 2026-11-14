@@ -6,7 +6,7 @@ using Xunit;
 public class RoutingTests
 {
     [Fact]
-    public async Task PeerQueuesRetainTransferBurstsWithoutDisconnecting()
+    public async Task FullPeerQueuesDropTheOldestPackets()
     {
         var peer = new Peer();
         const int count = 16_384;
@@ -16,11 +16,13 @@ public class RoutingTests
             BinaryPrimitives.WriteInt32LittleEndian(packet, i);
             Assert.True(peer.Send(packet));
         }
-        for (int i = 0; i < count; i++)
+        Assert.Equal(count - Peer.QueueLimit, peer.Dropped);
+        for (int i = count - Peer.QueueLimit; i < count; i++)
         {
             Assert.True(peer.Outgoing.Reader.TryRead(out byte[]? packet));
             Assert.Equal(i, BinaryPrimitives.ReadInt32LittleEndian(packet!));
         }
+        Assert.False(peer.Outgoing.Reader.TryRead(out _));
         Assert.True(peer.Send([42]));
         Assert.True(peer.Outgoing.Reader.TryRead(out _));
         peer.Outgoing.Writer.TryComplete();
