@@ -1,6 +1,6 @@
 # smolmesh2 (.NET)
 
-A C# port of the Rust node for .NET 10. It runs on Linux, macOS and Windows,
+A C# port of the Rust node for .NET 11. It runs on Linux, macOS and Windows,
 and works in the same mesh as Rust nodes.
 
 See the [main README](../README.md) for how smolmesh2 works and how to write a
@@ -8,7 +8,7 @@ config file.
 
 ## Build and run
 
-From the repository root, with the .NET 10 SDK installed:
+From the repository root, with the .NET 11 SDK installed:
 
 ```sh
 dotnet build dotnet/Smolmesh.slnx -c Release
@@ -25,7 +25,7 @@ To publish a build that uses the installed .NET runtime:
 dotnet publish dotnet/Smolmesh -c Release --no-self-contained
 ```
 
-The output is in `dotnet/Smolmesh/bin/Release/net10.0/publish/`. Run the
+The output is in `dotnet/Smolmesh/bin/Release/net11.0/publish/`. Run the
 `smolmesh` executable there, or `dotnet smolmesh.dll`.
 
 ### macOS setuid build

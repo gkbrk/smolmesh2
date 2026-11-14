@@ -9,7 +9,7 @@ This repo has two implementations. They speak the same protocol and read the
 same config, so you can mix them in one network.
 
 - [rust/](rust/) is the original version, for Linux and macOS.
-- [dotnet/](dotnet/) is a C# port for .NET 10, for Linux, macOS and Windows.
+- [dotnet/](dotnet/) is a C# port for .NET 11, for Linux, macOS and Windows.
 
 The README in each folder explains how to build and run that version.
 

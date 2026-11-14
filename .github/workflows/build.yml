@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 11.0.x
       - run: >
           dotnet publish dotnet/Smolmesh/Smolmesh.csproj -c Release -r ${{ matrix.rid }}
           --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
