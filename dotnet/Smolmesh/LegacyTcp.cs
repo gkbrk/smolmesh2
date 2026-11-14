@@ -15,7 +15,8 @@ internal static class LegacyTcp
     internal static readonly TimeSpan IoTimeout = TimeSpan.FromSeconds(30);
     // Size of the receive buffer, and how much the send loop gathers before one socket write.
     internal const int BufferSize = 64 * 1024;
-    private const int FrameOverhead = 2 + 16;
+    // Each frame is the 2-byte length and the packet, encrypted together, then the stream's tag.
+    private const int FrameOverhead = 2 + AsconStream.TagSize;
 
     internal static async Task ConnectLoopAsync(TransportConfiguration config, Routing routing,
         ChannelWriter<(byte[] Packet, Peer Peer)> incoming, CancellationToken token)
@@ -141,8 +142,8 @@ internal static class LegacyTcp
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(token);
         routing.Add(peer);
         Log.Information("Authenticated {Direction} connection to {Remote}", initiator ? "outbound" : "inbound", remote);
-        Task send = SendAsync(stream, peer, Derive(key, sendIv, "enc_key"), Derive(key, sendIv, "mac_key"), stop.Token);
-        Task receive = ReceiveAsync(reader, peer, incoming, Derive(key, receiveIv, "enc_key"), Derive(key, receiveIv, "mac_key"), stop.Token);
+        Task send = SendAsync(stream, peer, new AsconStream(StreamKey(key, sendIv, receiveIv)), stop.Token);
+        Task receive = ReceiveAsync(reader, peer, incoming, new AsconStream(StreamKey(key, receiveIv, sendIv)), stop.Token);
         try
         {
             await await Task.WhenAny(send, receive);
@@ -157,41 +158,44 @@ internal static class LegacyTcp
         }
     }
 
-    internal static byte[] Derive(byte[] key, byte[] iv, string label) => Gimli.Multi(key, iv, Encoding.UTF8.GetBytes(label));
+    internal static byte[] Derive(byte[] key, byte[] iv, string label) => Ascon.Multi(key, iv, Encoding.UTF8.GetBytes(label));
+
+    // Each direction's key depends on both IVs, sender's first, so replaying an old handshake
+    // can't bring back an old stream.
+    internal static byte[] StreamKey(byte[] key, byte[] senderIv, byte[] receiverIv) =>
+        Ascon.Multi(key, senderIv, receiverIv, "stream"u8.ToArray());
 
     private static Task WriteHandshakeAsync(Stream stream, byte[] key, byte[] iv, CancellationToken token) =>
         WriteAsync(stream, (byte[])[.. iv, .. Derive(key, iv, "keyfinder")], token);
 
-    internal static byte[] Encode(byte[] packet, byte[] macKey, GimliKeystream keystream)
+    internal static byte[] Encode(byte[] packet, AsconStream cipher)
     {
         var frame = new ArrayBufferWriter<byte>(packet.Length + FrameOverhead);
-        Encode(packet, macKey, keystream, frame);
+        Encode(packet, cipher, frame);
         return frame.WrittenSpan.ToArray();
     }
 
-    internal static void Encode(byte[] packet, byte[] macKey, GimliKeystream keystream, ArrayBufferWriter<byte> output)
+    internal static void Encode(byte[] packet, AsconStream cipher, ArrayBufferWriter<byte> output)
     {
         if (packet.Length > ushort.MaxValue) throw new InvalidDataException("Packet exceeds legacy framing limit.");
         int size = packet.Length + FrameOverhead;
         Span<byte> frame = output.GetSpan(size)[..size];
         BinaryPrimitives.WriteUInt16LittleEndian(frame, (ushort)packet.Length);
         packet.CopyTo(frame[2..]);
-        Gimli.Multi(macKey, packet).CopyTo(frame[(2 + packet.Length)..]);
-        keystream.Apply(frame);
+        cipher.Seal(frame[..(2 + packet.Length)], frame[(2 + packet.Length)..]);
         output.Advance(size);
     }
 
     // Encodes every packet already queued, up to BufferSize, and sends them in one write.
     // The byte stream is the same as sending frames one by one, so peers can't tell.
-    private static async Task SendAsync(Stream stream, Peer peer, byte[] encKey, byte[] macKey, CancellationToken token)
+    private static async Task SendAsync(Stream stream, Peer peer, AsconStream cipher, CancellationToken token)
     {
-        var keystream = new GimliKeystream(encKey);
         var batch = new ArrayBufferWriter<byte>(BufferSize + ushort.MaxValue + FrameOverhead);
         ChannelReader<byte[]> reader = peer.Outgoing.Reader;
         while (await reader.WaitToReadAsync(token))
         {
             while (batch.WrittenCount < BufferSize && reader.TryRead(out byte[]? packet))
-                if (packet.Length != 0) Encode(packet, macKey, keystream, batch);
+                if (packet.Length != 0) Encode(packet, cipher, batch);
             if (batch.WrittenCount == 0) continue;
             await WriteAsync(stream, batch.WrittenMemory, token);
             batch.ResetWrittenCount();
@@ -199,24 +203,19 @@ internal static class LegacyTcp
     }
 
     private static async Task ReceiveAsync(Stream stream, Peer peer, ChannelWriter<(byte[] Packet, Peer Peer)> incoming,
-        byte[] encKey, byte[] macKey, CancellationToken token)
+        AsconStream cipher, CancellationToken token)
     {
-        var keystream = new GimliKeystream(encKey);
-        byte[] length = new byte[2];
+        byte[] frame = new byte[ushort.MaxValue + FrameOverhead];
+        byte[] keystream = new byte[2];
         while (true)
         {
-            await ReadAsync(stream, length, token);
-            keystream.Apply(length);
-            int count = BinaryPrimitives.ReadUInt16LittleEndian(length);
-            byte[] packet = new byte[count];
-            await ReadAsync(stream, packet, token);
-            keystream.Apply(packet);
-            byte[] mac = new byte[16];
-            await ReadAsync(stream, mac, token);
-            keystream.Apply(mac);
-            if (!CryptographicOperations.FixedTimeEquals(Gimli.Multi(macKey, packet), mac))
+            await ReadAsync(stream, frame.AsMemory(0, 2), token);
+            cipher.PeekKeystream(keystream);
+            int count = BinaryPrimitives.ReadUInt16LittleEndian(frame) ^ BinaryPrimitives.ReadUInt16LittleEndian(keystream);
+            await ReadAsync(stream, frame.AsMemory(2, count + AsconStream.TagSize), token);
+            if (!cipher.Open(frame.AsSpan(0, 2 + count), frame.AsSpan(2 + count, AsconStream.TagSize)))
                 throw new IOException("MAC verification failed.");
-            await incoming.WriteAsync((packet, peer), token);
+            await incoming.WriteAsync((frame[2..(2 + count)], peer), token);
         }
     }
 
