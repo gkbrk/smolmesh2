@@ -88,15 +88,17 @@ internal sealed class WindowsTun : ITun
         }
     }, token);
 
-    public async Task WriteAsync(byte[] packet, CancellationToken token)
+    public async Task WriteAsync(ReadOnlyMemory<byte> packet, CancellationToken token)
     {
+        // Every caller passes array-backed memory; the fallback copy is only for safety.
+        if (!MemoryMarshal.TryGetArray(packet, out ArraySegment<byte> segment)) segment = packet.ToArray();
         while (true)
         {
             token.ThrowIfCancellationRequested();
             nint destination = Native.WintunAllocateSendPacket(session, (uint)packet.Length);
             if (destination != 0)
             {
-                Marshal.Copy(packet, 0, destination, packet.Length);
+                Marshal.Copy(segment.Array!, segment.Offset, destination, segment.Count);
                 Native.WintunSendPacket(session, destination);
                 return;
             }

@@ -130,33 +130,33 @@ internal sealed class UnixTun : ITun
         }
     }
 
-    public async Task WriteAsync(byte[] packet, CancellationToken token)
+    public async Task WriteAsync(ReadOnlyMemory<byte> packet, CancellationToken token)
     {
         if (!mac)
         {
-            await WriteAsync(packet, packet.Length, token);
+            await WritePacketAsync(packet, token);
             return;
         }
-        if (Protocol.Destination(packet) is null) return;
+        if (Protocol.Destination(packet.Span) is null) return;
         // utun expects the address family ahead of each packet.
         int length = 4 + packet.Length;
         byte[] buffer = ArrayPool<byte>.Shared.Rent(length);
         try
         {
-            BinaryPrimitives.WriteUInt32BigEndian(buffer, packet[0] >> 4 == 4 ? 2u : 30u);
-            packet.CopyTo(buffer, 4);
-            await WriteAsync(buffer, length, token);
+            BinaryPrimitives.WriteUInt32BigEndian(buffer, packet.Span[0] >> 4 == 4 ? 2u : 30u);
+            packet.Span.CopyTo(buffer.AsSpan(4));
+            await WritePacketAsync(buffer.AsMemory(0, length), token);
         }
         finally { ArrayPool<byte>.Shared.Return(buffer); }
     }
 
-    private async Task WriteAsync(byte[] buffer, int length, CancellationToken token)
+    private async Task WritePacketAsync(ReadOnlyMemory<byte> packet, CancellationToken token)
     {
         while (true)
         {
             token.ThrowIfCancellationRequested();
-            nint count = Native.write(fd, buffer, (nuint)length);
-            if (count == length) return;
+            nint count = Native.write(fd, ref MemoryMarshal.GetReference(packet.Span), (nuint)packet.Length);
+            if (count == packet.Length) return;
             if (count < 0 && WouldBlock())
             {
                 await Task.Delay(2, token);
@@ -204,6 +204,6 @@ internal sealed class UnixTun : ITun
         [DllImport("libc", SetLastError = true)] internal static extern int getsockopt(int fd, int level, int option, byte[] value, ref uint length);
         [DllImport("libc", SetLastError = true)] internal static extern int poll(ref PollFd fds, uint count, int timeout);
         [DllImport("libc", SetLastError = true)] internal static extern nint read(int fd, byte[] data, nuint count);
-        [DllImport("libc", SetLastError = true)] internal static extern nint write(int fd, byte[] data, nuint count);
+        [DllImport("libc", SetLastError = true)] internal static extern nint write(int fd, ref byte data, nuint count);
     }
 }

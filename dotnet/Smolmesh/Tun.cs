@@ -7,7 +7,7 @@ namespace Smolmesh;
 internal interface ITun : IDisposable
 {
     Task<byte[]> ReadAsync(CancellationToken token);
-    Task WriteAsync(byte[] packet, CancellationToken token);
+    Task WriteAsync(ReadOnlyMemory<byte> packet, CancellationToken token);
     Task AddRouteAsync(IPAddress address, CancellationToken token);
 }
 

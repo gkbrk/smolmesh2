@@ -123,7 +123,7 @@ internal sealed class MeshNode
         if (packet.Length < 9) return;
         ulong timestamp = BinaryPrimitives.ReadUInt64LittleEndian(packet);
         if (!Protocol.Fresh(timestamp, Protocol.Millis) || seen.Add(packet)) return;
-        byte[] payload = packet[9..];
+        ReadOnlyMemory<byte> payload = packet.AsMemory(9);
         IPAddress? address;
         switch (packet[8])
         {
@@ -131,7 +131,7 @@ internal sealed class MeshNode
                 string nodeName;
                 try
                 {
-                    nodeName = StrictUtf8.GetString(payload);
+                    nodeName = StrictUtf8.GetString(payload.Span);
                     address = Protocol.NodeAddress(nodeName);
                 }
                 catch (DecoderFallbackException) { return; }
@@ -141,11 +141,11 @@ internal sealed class MeshNode
                 break;
             case 1 when payload.Length == 16:
             case 2 when payload.Length == 4:
-                address = new IPAddress(payload);
+                address = new IPAddress(payload.Span);
                 Log.Information("Received IPv{Version} tracer: {Address}", packet[8] == 1 ? 6 : 4, Protocol.FormatAddress(address));
                 break;
             case 3:
-                address = Protocol.Destination(payload);
+                address = Protocol.Destination(payload.Span);
                 if (address is null) return;
                 if (ourAddresses.Contains(address))
                 {
@@ -154,19 +154,19 @@ internal sealed class MeshNode
                 else routing.Send(address, packet);
                 return;
             case 4 when payload.Length == 41:
-                HandleProbe(payload);
+                HandleProbe(payload.ToArray());
                 return;
             case 5 when payload.Length > 25:
-                var source = new IPAddress(payload[9..25]);
+                var source = new IPAddress(payload.Span[9..25]);
                 if (!ourAddresses.Contains(source))
                 {
                     routing.Send(source, packet);
                     return;
                 }
-                ulong nonce = BinaryPrimitives.ReadUInt64LittleEndian(payload);
+                ulong nonce = BinaryPrimitives.ReadUInt64LittleEndian(payload.Span);
                 if (traces.TryGetValue(nonce, out var replies))
                 {
-                    try { replies.Enqueue((StrictUtf8.GetString(payload[25..]), payload[8], Environment.TickCount64)); }
+                    try { replies.Enqueue((StrictUtf8.GetString(payload.Span[25..]), payload.Span[8], Environment.TickCount64)); }
                     catch (DecoderFallbackException) { }
                 }
                 return;
