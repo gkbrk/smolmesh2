@@ -71,20 +71,27 @@ counterparts and link two .NET nodes over UDP:
 Each mesh packet is one datagram: the packet enciphered with LION
 (`Crypto/Lion.cs`) under a key derived from the shared secret. The datagram is
 exactly as long as the packet and looks like random bytes. There is no
-handshake, nonce, tag or keepalive. LION needs at least 17 bytes, so the few
+nonce or tag. LION needs at least 17 bytes, so the few
 packets shorter than that (announcements of an IPv4 address or of a name under
 8 bytes) are filled up to 17.
 
-- Each key on a listener stands for one neighbour. Two nodes connecting with
-  the same key take the link from each other.
-- The listener learns a neighbour's address from its datagrams and follows it
-  when the address changes. A link that hears nothing for 30 seconds is
-  dropped until the neighbour is heard again.
+- A connector sends a hello (a link-only packet with a random link id, 17 bytes)
+  first and then every 30 seconds. The listener answers each one. Hellos are
+  not passed on to the mesh.
+- Any number of nodes can connect with the same key. The listener keeps one
+  link per link id, up to 256, and learns the neighbour's address from its
+  hello. A hello from a new address, newer than the last one for that id, moves
+  the link. Data from an address without a link is ignored.
+- A link that hears nothing for 3 minutes is dropped. A connector that hears
+  nothing for 30 seconds starts over with a new hello.
 - A node can have TCP and UDP links to the same neighbour. Routes then follow
   whichever link delivers announcements first, and the other is the fallback.
 - A datagram is authenticated only by decrypting to a mesh packet with a
   current timestamp. A captured datagram can be replayed for as long as its
   timestamp is accepted, three minutes, once the mesh has forgotten the packet.
+  A replay can't start or move a link: only a hello does that, and it has to be
+  newer than the last hello of its link, which the listener remembers for as
+  long as a replay of it would be accepted.
 - The cipher has had no outside review.
 
 ## TUN interface requirements

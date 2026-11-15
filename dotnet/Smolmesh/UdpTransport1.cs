@@ -3,6 +3,7 @@ using Smolmesh.Crypto;
 using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Channels;
 
@@ -10,20 +11,35 @@ namespace Smolmesh;
 
 // Mesh packets over UDP, one per datagram. A datagram is the packet enciphered with LION under a
 // key derived from the shared secret, and nothing else: it is as long as the packet and looks
-// like random bytes. There is no handshake, nonce, tag or keepalive.
+// like random bytes. There is no nonce or tag.
 //
 // The timestamp that starts every mesh packet does their work. It makes every packet different.
 // It stands in for the tag: a datagram made without the key decrypts to random bytes, whose
-// timestamp is not the present moment. And it orders datagrams, so a neighbour is followed to a
-// new address only by a datagram newer than any seen from it, which a replayed one is not.
+// timestamp is not the present moment.
 //
-// A captured datagram stays valid while its timestamp is fresh, and is accepted again if it is
-// replayed after the mesh has forgotten its packet.
+// A connector starts with a hello, a packet only this transport knows, and repeats it. It holds a
+// random link id. A listener keeps one link per id, so any number of neighbours can share a key,
+// and moves the link to the address of a hello newer than the last one it had for that id. Only
+// a hello starts or moves a link, so a captured datagram replayed from a forged address does
+// nothing: a data packet has no link there, and a hello is not newer. A link's newest hello is
+// kept until a replay of it would no longer be fresh.
+//
+// A captured data datagram stays valid while its timestamp is fresh, and is accepted again from
+// the link's address if it is replayed after the mesh has forgotten its packet.
 internal static class UdpTransport1
 {
-    // Every node announces its name at least every 10 seconds, so a live neighbour is never this quiet.
+    // Every node announces its name at least every 10 seconds, so a live listener is never this quiet.
     internal static readonly TimeSpan Silence = TimeSpan.FromSeconds(30);
+    // A connector says hello this often. A listener drops a neighbour it has not heard from for the idle time.
+    internal static readonly TimeSpan HelloInterval = TimeSpan.FromSeconds(30);
+    internal static readonly TimeSpan Idle = TimeSpan.FromMinutes(3);
+    // Link-level and never passed on to the mesh: a random link id, enciphered like any packet. It
+    // is the command after the last mesh command, and 17 bytes with its header, LION's smallest size.
+    internal const byte Hello = Protocol.LastCommand + 1;
+    private const int HelloSize = 17;
     private const int MaxDatagram = 65507;
+    // Links of one listener, idle ones included, at most.
+    private const int MaxLinks = 256;
     private const int HeaderSize = 9;
     // Marks a filled-up packet in its command byte, on the wire only. No command is this large,
     // so the bit tells such a packet from a real one of the same length.
@@ -50,13 +66,18 @@ internal static class UdpTransport1
         return socket;
     }
 
-    // One key is one neighbour of a listener. It has a peer while it is heard from.
-    private sealed class Neighbour(byte[][] keys)
+    // One neighbour of a listener, named by the random id in its hellos. It has a peer and an
+    // address while it is heard from, and keeps the time of its newest hello after that, for as
+    // long as a replay of it would still be fresh.
+    private sealed class Link(ulong id, byte[][] keys)
     {
-        internal readonly byte[] ReceiveKey = keys[0], SendKey = keys[1];
+        internal readonly ulong Id = id;
+        internal readonly byte[][] Keys = keys;
+        internal byte[] ReceiveKey => Keys[0];
+        internal byte[] SendKey => Keys[1];
         // Replaced, never changed in place: the send loop reads it without the lock.
         internal volatile SocketAddress? Remote;
-        internal ulong Newest;
+        internal ulong NewestHello;
         internal long Heard;
         internal Peer? Peer;
         internal Task Send = Task.CompletedTask;
@@ -67,87 +88,135 @@ internal static class UdpTransport1
     {
         using Socket socket = Bind(config.Port);
         Log.Information("Listening on UDP port {Port}", config.Port);
-        await ListenAsync(socket, config.Keys.Select(Encoding.UTF8.GetBytes).ToArray(), routing, incoming, Silence, token);
+        await ListenAsync(socket, config.Keys.Select(Encoding.UTF8.GetBytes).ToArray(), routing, incoming, Idle, token);
     }
 
     internal static async Task ListenAsync(Socket socket, byte[][] keys, Routing routing,
-        ChannelWriter<(byte[] Packet, Peer Peer)> incoming, TimeSpan silence, CancellationToken token)
+        ChannelWriter<(byte[] Packet, Peer Peer)> incoming, TimeSpan idle, CancellationToken token)
     {
-        Neighbour[] neighbours = keys.Select(k => new Neighbour(DeriveKeys(k))).ToArray();
+        byte[][][] keySets = keys.Select(DeriveKeys).ToArray();
+        var links = new Links();
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(token);
-        Task expire = ExpireAsync(neighbours, routing, silence, stop.Token);
+        Task expire = ExpireAsync(links, routing, idle, stop.Token);
         try
         {
             byte[] packet = new byte[MaxDatagram];
             await foreach (var (datagram, from) in new DatagramBatch().ReceiveAllAsync(socket, stop.Token))
             {
-                // The neighbour at this address first, so that only a new or moved one costs a trial of
-                // every key. From any other address a datagram has to be newer than all before it.
-                Neighbour? heard = null;
+                // The link at this address first, so that only a new one costs a trial of every key.
+                Link? at;
+                lock (links) links.ByAddress.TryGetValue(from, out at);
+                byte[][]? opened = null;
                 int length = 0;
                 ulong timestamp = 0;
-                for (int pass = 0; pass < 2 && heard is null; pass++)
-                    foreach (var neighbour in neighbours)
-                        if (from.Equals(neighbour.Remote) == (pass == 0)
-                            && Open(neighbour.ReceiveKey, datagram.Span, packet, out length, out timestamp)
-                            && (pass == 0 || timestamp > neighbour.Newest))
+                if (at is not null && Open(at.ReceiveKey, datagram.Span, packet, out length, out timestamp)) opened = at.Keys;
+                else
+                {
+                    at = null;
+                    foreach (var set in keySets)
+                        if (Open(set[0], datagram.Span, packet, out length, out timestamp))
                         {
-                            heard = neighbour;
+                            opened = set;
                             break;
                         }
-                if (heard is null) continue;
-
-                Peer peer;
-                lock (heard)
-                {
-                    if (!from.Equals(heard.Remote))
-                    {
-                        Log.Information("UDP link from {Remote} is {State}", Describe(from), heard.Peer is null ? "up" : "at a new address");
-                        heard.Remote = Copy(from);
-                    }
-                    if (heard.Peer is null)
-                    {
-                        Neighbour started = heard;
-                        peer = started.Peer = new Peer();
-                        routing.Add(peer);
-                        started.Send = SendAsync(socket, peer, started.SendKey, () => started.Remote, stop.Token);
-                    }
-                    else peer = heard.Peer;
-                    heard.Newest = Math.Max(heard.Newest, timestamp);
-                    heard.Heard = Environment.TickCount64;
                 }
+                if (opened is null) continue;
+
+                if (packet[8] == Hello)
+                {
+                    if (length == HelloSize)
+                        lock (links) Greet(socket, links, routing, opened, BinaryPrimitives.ReadUInt64LittleEndian(packet.AsSpan(HeaderSize)),
+                            timestamp, from, stop.Token);
+                    continue;
+                }
+                // Only a hello starts a link, so a packet from an address that has none goes nowhere.
+                if (at is null) continue;
+                lock (links) at.Heard = Environment.TickCount64;
+                Peer? peer = at.Peer;
+                if (peer is null) continue;
                 await incoming.WriteAsync((packet.AsSpan(0, length).ToArray(), peer), stop.Token);
             }
         }
         finally
         {
             stop.Cancel();
-            foreach (var neighbour in neighbours)
-                lock (neighbour) Drop(neighbour, routing);
-            try { await Task.WhenAll([expire, .. neighbours.Select(n => n.Send)]); }
+            Link[] all;
+            lock (links) all = [.. links.ById.Values];
+            foreach (var link in all) lock (links) Retire(links, link, routing);
+            try { await Task.WhenAll([expire, .. all.Select(l => l.Send)]); }
             catch (OperationCanceledException) { }
         }
     }
 
-    private static async Task ExpireAsync(Neighbour[] neighbours, Routing routing, TimeSpan silence, CancellationToken token)
+    private sealed class Links
     {
-        using var timer = new PeriodicTimer(silence / 4);
-        while (await timer.WaitForNextTickAsync(token))
-            foreach (var neighbour in neighbours)
-                lock (neighbour)
-                {
-                    if (neighbour.Peer is null || Environment.TickCount64 - neighbour.Heard < silence.TotalMilliseconds) continue;
-                    Log.Information("UDP link from {Remote} went silent", Describe(neighbour.Remote!));
-                    Drop(neighbour, routing);
-                }
+        internal readonly Dictionary<ulong, Link> ById = [];
+        internal readonly Dictionary<SocketAddress, Link> ByAddress = [];
     }
 
-    // Forgets the address too, so the neighbour comes back only with a datagram newer than its last.
-    private static void Drop(Neighbour neighbour, Routing routing)
+    // A hello from an address, under the keys it opened with. Starts the link of its id, moves it
+    // to this address, or just shows it is alive. Called with links locked.
+    private static void Greet(Socket socket, Links links, Routing routing, byte[][] keys, ulong id, ulong timestamp,
+        SocketAddress from, CancellationToken token)
     {
-        if (neighbour.Peer is not null) routing.Remove(neighbour.Peer);
-        neighbour.Peer = null;
-        neighbour.Remote = null;
+        if (links.ById.TryGetValue(id, out Link? link))
+        {
+            // Not newer than the last hello, so a replay; or not under the keys the link began with.
+            if (timestamp <= link.NewestHello || !ReferenceEquals(link.Keys, keys)) return;
+        }
+        else
+        {
+            if (links.ById.Count >= MaxLinks) return;
+            links.ById[id] = link = new Link(id, keys);
+        }
+        link.NewestHello = timestamp;
+        link.Heard = Environment.TickCount64;
+        bool started = link.Peer is null;
+        if (started || !from.Equals(link.Remote))
+        {
+            // An address belongs to one link: a node that started over from it has a new id.
+            if (links.ByAddress.TryGetValue(from, out Link? other) && other != link) Retire(links, other, routing);
+            if (link.Remote is { } old) links.ByAddress.Remove(old);
+            SocketAddress remote = Copy(from);
+            link.Remote = remote;
+            links.ByAddress[remote] = link;
+            Log.Information("UDP link from {Remote} is {State}", Describe(remote), started ? "up" : "at a new address");
+        }
+        if (started)
+        {
+            Peer peer = link.Peer = new Peer();
+            routing.Add(peer);
+            link.Send = SendAsync(socket, peer, link.SendKey, () => link.Remote, token);
+        }
+        // Answered, so that the connector knows the link is up without waiting for mesh traffic.
+        link.Peer!.Send(Protocol.Packet(Hello, BitConverter.GetBytes(id)));
+    }
+
+    // Takes the peer and the address away from a link. Its newest hello stays in ById.
+    private static void Retire(Links links, Link link, Routing routing)
+    {
+        if (link.Peer is not null) routing.Remove(link.Peer);
+        link.Peer = null;
+        if (link.Remote is { } address) links.ByAddress.Remove(address);
+        link.Remote = null;
+    }
+
+    private static async Task ExpireAsync(Links links, Routing routing, TimeSpan idle, CancellationToken token)
+    {
+        using var timer = new PeriodicTimer(idle / 4);
+        while (await timer.WaitForNextTickAsync(token))
+            lock (links)
+                foreach (Link link in links.ById.Values.ToArray())
+                {
+                    if (link.Peer is not null && Environment.TickCount64 - link.Heard >= idle.TotalMilliseconds)
+                    {
+                        Log.Information("UDP link from {Remote} went idle", Describe(link.Remote!));
+                        Retire(links, link, routing);
+                    }
+                    // Forgotten only when a replay of its newest hello is no longer fresh.
+                    if (link.Peer is null && !Protocol.Fresh(link.NewestHello, Protocol.Millis))
+                        links.ById.Remove(link.Id);
+                }
     }
 
     internal static async Task ConnectAsync(TransportConfiguration config, Routing routing,
@@ -173,10 +242,10 @@ internal static class UdpTransport1
     }
 
     // One link to a listener, until it has been silent for too long. The peer exists and sends from
-    // the start, since the listener learns of us from our first datagram. Returns whether the
-    // listener was ever heard.
+    // the start, with a hello before anything else, since the listener learns of us from that.
+    // Returns whether the listener was ever heard.
     internal static async Task<bool> RunAsync(IPEndPoint remote, byte[][] keys, Routing routing,
-        ChannelWriter<(byte[] Packet, Peer Peer)> incoming, TimeSpan silence, CancellationToken token)
+        ChannelWriter<(byte[] Packet, Peer Peer)> incoming, TimeSpan silence, CancellationToken token, TimeSpan? helloEvery = null)
     {
         using Socket socket = Bind(0);
         if (socket.AddressFamily == AddressFamily.InterNetworkV6) remote = new IPEndPoint(remote.Address.MapToIPv6(), remote.Port);
@@ -185,6 +254,7 @@ internal static class UdpTransport1
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(token);
         routing.Add(peer);
         Task send = SendAsync(socket, peer, keys[0], () => address, stop.Token);
+        Task hellos = HelloAsync(peer, helloEvery ?? HelloInterval, stop.Token);
         bool heard = false;
         try
         {
@@ -197,6 +267,7 @@ internal static class UdpTransport1
                 if (!heard) Log.Information("UDP link to {Remote} is up", LegacyTcp.Describe(remote));
                 heard = true;
                 stop.CancelAfter(silence);
+                if (packet[8] == Hello) continue;
                 await incoming.WriteAsync((packet.AsSpan(0, length).ToArray(), peer), stop.Token);
             }
         }
@@ -205,10 +276,20 @@ internal static class UdpTransport1
         {
             stop.Cancel();
             routing.Remove(peer);
-            try { await send; }
+            try { await Task.WhenAll(send, hellos); }
             catch (OperationCanceledException) { }
         }
         return heard;
+    }
+
+    // The first hello goes out at once, the rest every interval. The id names this link to the
+    // listener for as long as this runs.
+    private static async Task HelloAsync(Peer peer, TimeSpan every, CancellationToken token)
+    {
+        byte[] id = RandomNumberGenerator.GetBytes(8);
+        using var timer = new PeriodicTimer(every);
+        do peer.Send(Protocol.Packet(Hello, id));
+        while (await timer.WaitForNextTickAsync(token));
     }
 
     // Copies a packet into datagram and enciphers it there, returning the datagram's length. A
@@ -248,7 +329,7 @@ internal static class UdpTransport1
             length -= added;
         }
         timestamp = BinaryPrimitives.ReadUInt64LittleEndian(packet);
-        return Protocol.Fresh(timestamp, Protocol.Millis) && packet[8] <= Protocol.LastCommand;
+        return Protocol.Fresh(timestamp, Protocol.Millis) && packet[8] <= Hello;
     }
 
     // Enciphers and sends every queued packet until the peer is removed from routing, or its
@@ -263,7 +344,7 @@ internal static class UdpTransport1
             while (!batch.Full && queue.TryRead(out byte[]? packet))
             {
                 // Nothing the other side would not take for a mesh packet is worth sending.
-                if (packet.Length is < HeaderSize or > MaxDatagram || packet[8] > Protocol.LastCommand) continue;
+                if (packet.Length is < HeaderSize or > MaxDatagram || packet[8] > Hello) continue;
                 // Packets are shared between peers, so each is enciphered in a copy.
                 batch.Add(Seal(key, packet, batch.Next));
             }
