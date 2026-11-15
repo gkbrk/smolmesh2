@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 [assembly: InternalsVisibleTo("Smolmesh.Tests")]
+[assembly: InternalsVisibleTo("Smolmesh.NodeBenchmarks")]
 
 namespace Smolmesh;
 
