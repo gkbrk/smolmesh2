@@ -78,15 +78,9 @@ internal static class UdpTransport1
         Task expire = ExpireAsync(neighbours, routing, silence, stop.Token);
         try
         {
-            byte[] datagram = new byte[MaxDatagram], packet = new byte[MaxDatagram];
-            var from = new SocketAddress(socket.AddressFamily);
-            while (true)
+            byte[] packet = new byte[MaxDatagram];
+            await foreach (var (datagram, from) in new DatagramBatch().ReceiveAllAsync(socket, stop.Token))
             {
-                int count;
-                try { count = await socket.ReceiveFromAsync(datagram, SocketFlags.None, from, stop.Token); }
-                // Windows reports the ICMP errors of earlier sends here.
-                catch (SocketException) when (!stop.IsCancellationRequested) { continue; }
-
                 // The neighbour at this address first, so that only a new or moved one costs a trial of
                 // every key. From any other address a datagram has to be newer than all before it.
                 Neighbour? heard = null;
@@ -95,7 +89,7 @@ internal static class UdpTransport1
                 for (int pass = 0; pass < 2 && heard is null; pass++)
                     foreach (var neighbour in neighbours)
                         if (from.Equals(neighbour.Remote) == (pass == 0)
-                            && Open(neighbour.ReceiveKey, datagram.AsSpan(0, count), packet, out length, out timestamp)
+                            && Open(neighbour.ReceiveKey, datagram.Span, packet, out length, out timestamp)
                             && (pass == 0 || timestamp > neighbour.Newest))
                         {
                             heard = neighbour;
@@ -194,23 +188,19 @@ internal static class UdpTransport1
         bool heard = false;
         try
         {
-            byte[] datagram = new byte[MaxDatagram], packet = new byte[MaxDatagram];
-            var from = new SocketAddress(socket.AddressFamily);
+            byte[] packet = new byte[MaxDatagram];
             stop.CancelAfter(silence);
-            while (true)
+            await foreach (var (datagram, _) in new DatagramBatch().ReceiveAllAsync(socket, stop.Token))
             {
-                int count;
-                try { count = await socket.ReceiveFromAsync(datagram, SocketFlags.None, from, stop.Token); }
-                catch (SocketException) when (!stop.IsCancellationRequested) { continue; }
                 // Whoever holds the key is the listener, whatever address the datagram came from.
-                if (!Open(keys[1], datagram.AsSpan(0, count), packet, out int length, out _)) continue;
+                if (!Open(keys[1], datagram.Span, packet, out int length, out _)) continue;
                 if (!heard) Log.Information("UDP link to {Remote} is up", LegacyTcp.Describe(remote));
                 heard = true;
                 stop.CancelAfter(silence);
                 await incoming.WriteAsync((packet.AsSpan(0, length).ToArray(), peer), stop.Token);
             }
         }
-        catch (OperationCanceledException) when (!token.IsCancellationRequested) { return heard; }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested) { }
         finally
         {
             stop.Cancel();
@@ -218,6 +208,7 @@ internal static class UdpTransport1
             try { await send; }
             catch (OperationCanceledException) { }
         }
+        return heard;
     }
 
     // Copies a packet into datagram and enciphers it there, returning the datagram's length. A
@@ -261,20 +252,22 @@ internal static class UdpTransport1
     }
 
     // Enciphers and sends every queued packet until the peer is removed from routing, or its
-    // neighbour has no address any more.
+    // neighbour has no address any more. What is queued goes out in one batch.
     private static async Task SendAsync(Socket socket, Peer peer, byte[] key, Func<SocketAddress?> remote, CancellationToken token)
     {
-        byte[] datagram = new byte[MaxDatagram];
-        await foreach (byte[] packet in peer.Outgoing.Reader.ReadAllAsync(token))
+        var batch = new DatagramBatch();
+        var queue = peer.Outgoing.Reader;
+        while (await queue.WaitToReadAsync(token))
         {
-            // Nothing the other side would not take for a mesh packet is worth sending.
-            if (packet.Length is < HeaderSize or > MaxDatagram || packet[8] > Protocol.LastCommand) continue;
             if (remote() is not { } address) return;
-            // Packets are shared between peers, so each is enciphered in a copy.
-            int length = Seal(key, packet, datagram);
-            try { await socket.SendToAsync(datagram.AsMemory(0, length), SocketFlags.None, address, token); }
-            // A datagram that cannot be sent is one more that was lost.
-            catch (SocketException) { }
+            while (!batch.Full && queue.TryRead(out byte[]? packet))
+            {
+                // Nothing the other side would not take for a mesh packet is worth sending.
+                if (packet.Length is < HeaderSize or > MaxDatagram || packet[8] > Protocol.LastCommand) continue;
+                // Packets are shared between peers, so each is enciphered in a copy.
+                batch.Add(Seal(key, packet, batch.Next));
+            }
+            batch.Send(socket, address);
         }
     }
 
