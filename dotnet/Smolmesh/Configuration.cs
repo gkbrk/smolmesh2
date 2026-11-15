@@ -37,13 +37,18 @@ internal sealed class Configuration
                 throw new InvalidDataException($"Invalid IPv4 address: {address}");
         foreach (var transport in Transports)
         {
-            if (transport is null || transport.Port is < 1 or > 65535)
-                throw new InvalidDataException("Every transport needs a port between 1 and 65535.");
+            // A udp1 node that nobody says hello to first can leave the port to the system.
+            if (transport is null || transport.Port is < 0 or > 65535 || transport.Port == 0 && transport.Type != "udp1")
+                throw new InvalidDataException("Every transport needs a port between 1 and 65535, or 0 for any port with udp1.");
             switch (transport.Type)
             {
-                case "legacy_tcp_connect" or "udp1_connect" when !string.IsNullOrWhiteSpace(transport.Host) && transport.Key is not null:
+                case "legacy_tcp_connect" when !string.IsNullOrWhiteSpace(transport.Host) && transport.Key is not null:
                     break;
-                case "legacy_tcp_listen" or "udp1_listen" when transport.Keys is { Length: > 0 } && transport.Keys.All(k => k is not null):
+                case "legacy_tcp_listen" when transport.Keys is { Length: > 0 } && transport.Keys.All(k => k is not null):
+                    break;
+                // A peer with a host is said hello to at its port; one without only answers.
+                case "udp1" when transport.Peers is { Length: > 0 } && transport.Peers.All(p => p is { Key: not null }
+                    && (string.IsNullOrWhiteSpace(p.Host) ? p.Port == 0 : p.Port is >= 1 and <= 65535)):
                     break;
                 default:
                     throw new InvalidDataException($"Invalid transport configuration: {transport.Type}");
@@ -62,4 +67,12 @@ internal sealed class TransportConfiguration
     [JsonPropertyName("port")] public int Port { get; set; }
     [JsonPropertyName("key")] public string? Key { get; set; }
     [JsonPropertyName("keys")] public string[] Keys { get; set; } = [];
+    [JsonPropertyName("peers")] public UdpPeerConfiguration[] Peers { get; set; } = [];
+}
+
+internal sealed class UdpPeerConfiguration
+{
+    [JsonPropertyName("key")] public string? Key { get; set; }
+    [JsonPropertyName("host")] public string? Host { get; set; }
+    [JsonPropertyName("port")] public int Port { get; set; }
 }

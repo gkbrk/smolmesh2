@@ -40,8 +40,7 @@ internal sealed class MeshNode
                 tasks.Add(transport.Type switch
                 {
                     "legacy_tcp_connect" => LegacyTcp.ConnectLoopAsync(transport, routing, incoming.Writer, stop.Token),
-                    "udp1_connect" => UdpTransport1.ConnectAsync(transport, routing, incoming.Writer, stop.Token),
-                    "udp1_listen" => UdpTransport1.ListenAsync(transport, routing, incoming.Writer, stop.Token),
+                    "udp1" => UdpTransport1.RunAsync(transport, routing, incoming.Writer, stop.Token),
                     _ => LegacyTcp.ListenAsync(transport, routing, incoming.Writer, stop.Token)
                 });
             tasks.Add(AnnounceAsync(0, Encoding.UTF8.GetBytes(config.NodeName), stop.Token));

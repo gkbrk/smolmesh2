@@ -55,18 +55,25 @@ the binary can use it to get root, for example by changing `PATH` or setting
   retrying.
 - On macOS, the `ipv4_addresses` are added to the interface too.
 - The TUN interface has an MTU of 1420, so that packets fit one UDP datagram.
-- The `udp1_listen` and `udp1_connect` transports, below. Rust nodes don't have
-  them.
+- The `udp1` transport, below. Rust nodes don't have it.
 
 ## UDP transport
 
-`udp1_listen` and `udp1_connect` take the same fields as their `legacy_tcp`
-counterparts and link two .NET nodes over UDP:
+`udp1` links .NET nodes over UDP. Both ends of a link are alike: a node has
+one socket on `port` and a list of peers, each a secret `key` and maybe a
+`host` and `port` to say hello to.
 
 ```json
-{ "type": "udp1_listen", "port": 6969, "keys": ["secret for rath"] }
-{ "type": "udp1_connect", "host": "203.0.113.5", "port": 6969, "key": "secret for rath" }
+{ "type": "udp1", "port": 6969, "peers": [
+    { "key": "secret for rath", "host": "rath.example.com", "port": 6969 },
+    { "key": "secret for laptops" }
+] }
 ```
+
+Two nodes that people connect to, such as ch01 and rath, list each other
+with a host and the same key, and get one link between them, whichever says
+hello first. A node that nobody says hello to, such as a laptop, can set
+`port` to 0 and take any free port.
 
 Each mesh packet is one datagram: the packet enciphered with LION
 (`Crypto/Lion.cs`) under a key derived from the shared secret. The datagram is
@@ -75,22 +82,27 @@ nonce or tag. LION needs at least 17 bytes, so the few
 packets shorter than that (announcements of an IPv4 address or of a name under
 8 bytes) are filled up to 17.
 
-- A connector sends a hello (a link-only packet with a random link id, 17 bytes)
-  first and then every 30 seconds. The listener answers each one. Hellos are
-  not passed on to the mesh.
-- Any number of nodes can connect with the same key. The listener keeps one
-  link per link id, up to 256, and learns the neighbour's address from its
-  hello. A hello from a new address, newer than the last one for that id, moves
-  the link. Data from an address without a link is ignored.
-- A link that hears nothing for 3 minutes is dropped. A connector that hears
-  nothing for 30 seconds starts over with a new hello.
+- A node says hello (a link-only packet with its random link id, 17 bytes) to
+  each of its hosts from its one socket: every 5 seconds until they are
+  linked, then every 30 seconds. It answers every hello under one of its keys,
+  from any address. Hellos and answers are not passed on to the mesh.
+- A node has one link id for as long as it runs, and keeps one link per link
+  id it hears, up to 256. Any number of nodes can share a key. A node learns
+  the address of a link from its hellos and answers, and one from a new
+  address, newer than the last one for that id, moves the link. Data from an
+  address without a link is ignored.
+- Hellos are enciphered under a key of the secret alone, data under a key of
+  the secret and both link ids, a different one for each direction. A node
+  ignores its own hellos and data sent back to it, and data from an earlier
+  run of either node.
+- A link that hears nothing for 3 minutes is dropped.
 - A node can have TCP and UDP links to the same neighbour. Routes then follow
   whichever link delivers announcements first, and the other is the fallback.
 - A datagram is authenticated only by decrypting to a mesh packet with a
   current timestamp. A captured datagram can be replayed for as long as its
   timestamp is accepted, three minutes, once the mesh has forgotten the packet.
   A replay can't start or move a link: only a hello does that, and it has to be
-  newer than the last hello of its link, which the listener remembers for as
+  newer than the last hello of its link, which the node remembers for as
   long as a replay of it would be accepted.
 - The cipher has had no outside review.
 
