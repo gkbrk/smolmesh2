@@ -11,6 +11,7 @@ use futures::{
 use leo_async::DSSResult;
 
 mod all_senders;
+mod ascon;
 mod gimli;
 mod ip_addr;
 mod legacy_tcp;

@@ -6,44 +6,17 @@ use futures::{
   channel::mpsc::{UnboundedSender, unbounded},
 };
 
+use crate::ascon::{self, AsconStream};
 use crate::leo_async::{self, ArcFd};
-use crate::{DSSResult, all_senders, gimli, info, log};
+use crate::{DSSResult, all_senders, info, log};
 
-struct KeystreamGen {
-  gimli_state: gimli::GimliState,
-  n: u8,
-}
+// The wire format matches dotnet/Smolmesh/LegacyTcp.cs. Each side sends a 16-byte random IV and a
+// keyfinder, multi(key, iv, "keyfinder"), which tells a listener which of its keys is in use. The
+// connecting side sends first. Each direction is then one AsconStream keyed with
+// multi(key, sender_iv, receiver_iv, "stream"), and every frame is the 2-byte little-endian length
+// and the packet, encrypted together, followed by the stream's tag.
 
-impl KeystreamGen {
-  fn new(key: &[u8]) -> Self {
-    let mut state = gimli::GimliState::new();
-    state.buf_mut()[0..8].copy_from_slice(&key.len().to_le_bytes());
-    state.permute();
-
-    for chunk in key.chunks(gimli::RATE_BYTES) {
-      for (i, c) in chunk.iter().enumerate() {
-        state.buf_mut()[i] ^= *c;
-      }
-      state.permute();
-    }
-
-    Self {
-      gimli_state: state,
-      n: 0,
-    }
-  }
-
-  #[inline(always)]
-  fn next(&mut self) -> u8 {
-    let byte = self.gimli_state.buf()[self.n as usize];
-    self.n += 1;
-    if self.n == 16 {
-      self.gimli_state.permute();
-      self.n = 0;
-    }
-    byte
-  }
-}
+const IO_TIMEOUT_MS: usize = 30_000;
 
 async fn asyncread_readexact_timeout<R: futures::AsyncRead + ?Sized + Unpin>(
   reader: &mut R,
@@ -101,50 +74,165 @@ async fn connect_timeout(addr: &std::net::SocketAddr, timeout: std::time::Durati
   Ok(sock)
 }
 
-fn multigimli3(x: &[u8], y: &[u8], z: &[u8]) -> [u8; 16] {
-  let mut state = gimli::GimliState::new();
-
-  state.buf_mut()[0..8].copy_from_slice(&x.len().to_le_bytes());
-  state.permute();
-  state.buf_mut()[0..8].copy_from_slice(&y.len().to_le_bytes());
-  state.permute();
-  state.buf_mut()[0..8].copy_from_slice(&z.len().to_le_bytes());
-  state.permute();
-
-  for buf in [x, y, z].iter() {
-    for chunk in buf.chunks(gimli::RATE_BYTES) {
-      for (i, c) in chunk.iter().enumerate() {
-        state.buf_mut()[i] ^= *c;
-      }
-      state.permute();
-    }
-  }
-
-  let mut res = [0u8; 16];
-  res.copy_from_slice(&state.buf()[0..16]);
-  res
+fn keyfinder(key: &[u8], iv: &[u8; 16]) -> [u8; 16] {
+  ascon::multi(&[key, iv, b"keyfinder"])
 }
 
-fn multigimli2(x: &[u8], y: &[u8]) -> [u8; 16] {
-  let mut state = gimli::GimliState::new();
+// Each direction's key depends on both IVs, sender's first, so replaying an old handshake can't
+// bring back an old stream.
+fn stream_key(key: &[u8], sender_iv: &[u8; 16], receiver_iv: &[u8; 16]) -> [u8; 16] {
+  ascon::multi(&[key, sender_iv, receiver_iv, b"stream"])
+}
 
-  state.buf_mut()[0..8].copy_from_slice(&x.len().to_le_bytes());
-  state.permute();
-  state.buf_mut()[0..8].copy_from_slice(&y.len().to_le_bytes());
-  state.permute();
+fn ct_eq(a: &[u8; 16], b: &[u8; 16]) -> bool {
+  a.iter().zip(b).fold(0, |acc, (x, y)| acc | (x ^ y)) == 0
+}
 
-  for buf in [x, y].iter() {
-    for chunk in buf.chunks(gimli::RATE_BYTES) {
-      for (i, c) in chunk.iter().enumerate() {
-        state.buf_mut()[i] ^= *c;
-      }
-      state.permute();
+fn random_iv() -> [u8; 16] {
+  let mut iv = [0u8; 16];
+  iv[..8].copy_from_slice(&crate::rng::u64().to_le_bytes());
+  iv[8..].copy_from_slice(&crate::rng::u64().to_le_bytes());
+  iv
+}
+
+fn encode_frame(packet: &[u8], cipher: &mut AsconStream, out: &mut BytesMut) {
+  out.reserve(2 + packet.len() + AsconStream::TAG_SIZE);
+  let start = out.len();
+  out.extend_from_slice(&(packet.len() as u16).to_le_bytes());
+  out.extend_from_slice(packet);
+  let tag = cipher.seal(&mut out[start..]);
+  out.extend_from_slice(&tag);
+}
+
+// Runs the handshake and then both directions until either fails. The initiator uses keys[0];
+// a listener picks whichever of its keys matches the peer's keyfinder.
+async fn run_link(
+  conn: &ArcFd,
+  keys: &[Vec<u8>],
+  initiator: bool,
+  incoming: UnboundedSender<(Bytes, UnboundedSender<Bytes>)>,
+) -> DSSResult<()> {
+  let read_sock = conn.dup()?;
+  let mut write_sock = conn.dup()?;
+  fd_make_nonblocking(&read_sock)?;
+  fd_make_nonblocking(&write_sock)?;
+
+  // All reads, the handshake included, go through one buffer: frames that arrive together with
+  // the peer's handshake must not be lost.
+  let mut reader = futures::io::BufReader::new(read_sock);
+  let send_iv = random_iv();
+  let mut recv_iv = [0u8; 16];
+  let mut recv_keyfinder = [0u8; 16];
+
+  let key = if initiator {
+    let key = keys[0].clone();
+    write_handshake(&mut write_sock, &key, &send_iv).await?;
+    asyncread_readexact_timeout(&mut reader, &mut recv_iv, IO_TIMEOUT_MS).await?;
+    asyncread_readexact_timeout(&mut reader, &mut recv_keyfinder, IO_TIMEOUT_MS).await?;
+    if !ct_eq(&keyfinder(&key, &recv_iv), &recv_keyfinder) {
+      return Err("Got incorrect keyfinder".into());
     }
-  }
+    key
+  } else {
+    asyncread_readexact_timeout(&mut reader, &mut recv_iv, IO_TIMEOUT_MS).await?;
+    asyncread_readexact_timeout(&mut reader, &mut recv_keyfinder, IO_TIMEOUT_MS).await?;
+    let Some(key) = keys
+      .iter()
+      .find(|k| ct_eq(&keyfinder(k, &recv_iv), &recv_keyfinder))
+      .cloned()
+    else {
+      return Err("Got incorrect keyfinder".into());
+    };
+    write_handshake(&mut write_sock, &key, &send_iv).await?;
+    key
+  };
+  log!("Got correct keyfinder");
 
-  let mut res = [0u8; 16];
-  res.copy_from_slice(&state.buf()[0..16]);
-  res
+  let mut send_cipher = AsconStream::new(&stream_key(&key, &send_iv, &recv_iv));
+  let mut recv_cipher = AsconStream::new(&stream_key(&key, &recv_iv, &send_iv));
+
+  let (sender_tx, mut sender_rx) = unbounded::<Bytes>();
+  all_senders::get().add(sender_tx.clone());
+
+  let send_task = async move {
+    let mut writer = futures::io::BufWriter::new(write_sock);
+    let mut frame = BytesMut::with_capacity(2048);
+
+    loop {
+      leo_async::yield_now().await;
+      let Some(packet) = sender_rx.next().await else {
+        return;
+      };
+      // Empty data means there is a cleaner checking the channel
+      if packet.is_empty() {
+        continue;
+      }
+      if packet.len() > u16::MAX as usize {
+        crate::log!(
+          "Dropping packet that exceeds the legacy framing limit ({} bytes)",
+          packet.len()
+        );
+        continue;
+      }
+
+      frame.clear();
+      encode_frame(&packet, &mut send_cipher, &mut frame);
+
+      if let Err(e) = asyncwrite_writeall_timeout(&mut writer, &frame, IO_TIMEOUT_MS).await {
+        crate::log!("legacy_tcp send write error: {}", e);
+        return;
+      }
+      if let Err(e) = writer.flush().await {
+        crate::log!("legacy_tcp send flush error: {}", e);
+        return;
+      }
+    }
+  };
+
+  let recv_task = async move {
+    let mut frame = vec![0u8; 2 + u16::MAX as usize + AsconStream::TAG_SIZE];
+
+    loop {
+      leo_async::yield_now().await;
+      // Decrypt the length with the next keystream bytes, then read the rest of the frame.
+      asyncread_readexact_timeout(&mut reader, &mut frame[..2], IO_TIMEOUT_MS).await?;
+      let keystream: [u8; 2] = recv_cipher.peek_keystream();
+      let len = u16::from_le_bytes([frame[0] ^ keystream[0], frame[1] ^ keystream[1]]) as usize;
+      asyncread_readexact_timeout(
+        &mut reader,
+        &mut frame[2..2 + len + AsconStream::TAG_SIZE],
+        IO_TIMEOUT_MS,
+      )
+      .await?;
+
+      let (message, tag) = frame[..2 + len + AsconStream::TAG_SIZE].split_at_mut(2 + len);
+      if !recv_cipher.open(message, tag) {
+        return Err("MAC verification failed".into());
+      }
+
+      let packet = Bytes::copy_from_slice(&message[2..]);
+      if let Err(err) = incoming.unbounded_send((packet, sender_tx.clone())) {
+        log!("Error sending data: {:?}", err);
+        break;
+      }
+    }
+
+    DSSResult::Ok(())
+  };
+
+  let res = leo_async::select2_noresult(std::pin::pin!(send_task), std::pin::pin!(recv_task)).await;
+  crate::log!("Connection tasks completed: {:?}", res);
+
+  Ok(())
+}
+
+async fn write_handshake(write_sock: &mut ArcFd, key: &[u8], iv: &[u8; 16]) -> DSSResult<()> {
+  let mut handshake = [0u8; 32];
+  handshake[..16].copy_from_slice(iv);
+  handshake[16..].copy_from_slice(&keyfinder(key, iv));
+  asyncwrite_writeall_timeout(write_sock, &handshake, IO_TIMEOUT_MS).await?;
+  write_sock.flush().await?;
+  Ok(())
 }
 
 async fn connect_impl(
@@ -159,160 +247,7 @@ async fn connect_impl(
   crate::log!("Connected to {:?}", addr);
   leo_async::socket::set_nodelay(&sock)?;
 
-  let read_sock = sock.dup()?;
-  let mut write_sock = sock.dup()?;
-  crate::log!("Read sock: {}", read_sock.as_raw_fd());
-  crate::log!("Write sock: {}", write_sock.as_raw_fd());
-
-  fd_make_nonblocking(&read_sock)?;
-  fd_make_nonblocking(&write_sock)?;
-
-  let all_senders = all_senders::get();
-
-  let sender_iv = {
-    let mut iv = Vec::with_capacity(16);
-    iv.extend_from_slice(&crate::rng::u64().to_le_bytes());
-    iv.extend_from_slice(&crate::rng::u64().to_le_bytes());
-    iv
-  };
-
-  let keyfinder = multigimli3(key, &sender_iv, b"keyfinder");
-
-  asyncwrite_writeall_timeout(&mut write_sock, &sender_iv, 30_000).await?;
-  asyncwrite_writeall_timeout(&mut write_sock, &keyfinder, 30_000).await?;
-  write_sock.flush().await?;
-
-  let (sender_tx, mut sender_rx) = unbounded::<Bytes>();
-
-  all_senders.add(sender_tx.clone());
-
-  let send_enc_key = multigimli3(key, &sender_iv, b"enc_key");
-  let send_mac_key = multigimli3(key, &sender_iv, b"mac_key");
-
-  let send_task = {
-    async move {
-      let mut write_sock_bufwriter = futures::io::BufWriter::new(write_sock);
-      let mut keystream = KeystreamGen::new(&send_enc_key);
-      let mut packet_data = BytesMut::with_capacity(2048);
-
-      loop {
-        let Some(data) = sender_rx.next().await else {
-          return;
-        };
-        leo_async::yield_now().await;
-
-        // Empty data means there is a cleaner checking the channel
-        if data.is_empty() {
-          continue;
-        }
-
-        let mac = multigimli2(&send_mac_key, &data);
-
-        packet_data.reserve(2 + data.len() + 16);
-
-        packet_data.extend_from_slice(&(data.len() as u16).to_le_bytes());
-        packet_data.extend_from_slice(&data);
-        packet_data.extend_from_slice(&mac);
-
-        for byte in packet_data.iter_mut() {
-          *byte ^= keystream.next();
-        }
-
-        let to_send = packet_data.split_to(packet_data.len()).freeze();
-
-        match asyncwrite_writeall_timeout(&mut write_sock_bufwriter, &to_send, 30_000).await {
-          Ok(_) => {}
-          Err(e) => {
-            crate::log!("connect_impl send_task write error: {}", e);
-            return;
-          }
-        }
-        match write_sock_bufwriter.flush().await {
-          Ok(_) => {}
-          Err(e) => {
-            crate::log!("connect_impl send_task flush error: {}", e);
-            return;
-          }
-        }
-      }
-    }
-  };
-
-  let recv_task = {
-    let key = key.to_owned();
-
-    async move {
-      let mut read_sock_bufreader = futures::io::BufReader::new(read_sock);
-      let key = &key;
-
-      let recv_iv = {
-        let mut buf = [0u8; 16];
-        asyncread_readexact_timeout(&mut read_sock_bufreader, &mut buf, 30000).await?;
-        buf
-      };
-
-      let expected_keyfinder = multigimli3(key, &recv_iv, b"keyfinder");
-      let recv_keyfinder = {
-        let mut buf = [0u8; 16];
-        asyncread_readexact_timeout(&mut read_sock_bufreader, &mut buf, 30000).await?;
-        buf
-      };
-
-      if expected_keyfinder != recv_keyfinder {
-        return Err("Got incorrect keyfinder".into());
-      }
-
-      log!("Got correct keyfinder");
-
-      let recv_enc_key = multigimli3(key, &recv_iv, b"enc_key");
-      let recv_mac_key = multigimli3(key, &recv_iv, b"mac_key");
-
-      let mut keystream = KeystreamGen::new(&recv_enc_key);
-      let mut data = BytesMut::with_capacity(2048);
-
-      loop {
-        leo_async::yield_now().await;
-        // Read and decrypt length
-        let mut len_buf = [0u8; 2];
-        asyncread_readexact_timeout(&mut read_sock_bufreader, &mut len_buf, 30_000).await?;
-        len_buf[0] ^= keystream.next();
-        len_buf[1] ^= keystream.next();
-        let len = u16::from_le_bytes(len_buf);
-
-        // Read and decrypt data
-        data.resize(len as usize, 0);
-        asyncread_readexact_timeout(&mut read_sock_bufreader, &mut data, 30_000).await?;
-        for byte in data.iter_mut() {
-          *byte ^= keystream.next();
-        }
-
-        // Read and decrypt MAC
-        let mut mac = [0u8; 16];
-        asyncread_readexact_timeout(&mut read_sock_bufreader, &mut mac, 30_000).await?;
-        for byte in &mut mac {
-          *byte ^= keystream.next();
-        }
-
-        // Verify MAC
-        let expected_mac = multigimli2(&recv_mac_key, &data);
-
-        if expected_mac != mac {
-          return Err("MAC verification failed".into());
-        }
-
-        let to_send = data.split_to(data.len()).freeze();
-
-        if let Err(err) = incoming.unbounded_send((to_send, sender_tx.clone())) {
-          log!("Error sending data: {:?}", err);
-          break;
-        }
-      }
-
-      DSSResult::Ok(())
-    }
-  };
-
-  leo_async::select2_noresult(std::pin::pin!(send_task), std::pin::pin!(recv_task)).await;
+  run_link(&sock, &[key.to_owned()], true, incoming).await?;
 
   crate::info!("Connection finished");
 
@@ -349,165 +284,8 @@ pub async fn handle_connection(
   conn: ArcFd,
   incoming: UnboundedSender<(Bytes, UnboundedSender<Bytes>)>,
 ) -> DSSResult<()> {
-  let all_senders = all_senders::get();
   leo_async::socket::set_nodelay(&conn)?;
-
-  let mut read_sock = conn.dup()?;
-  let mut write_sock = conn.dup()?;
-
-  fd_make_nonblocking(&read_sock)?;
-  fd_make_nonblocking(&write_sock)?;
-
-  let incoming_iv = {
-    let mut buf = [0u8; 16];
-    asyncread_readexact_timeout(&mut read_sock, &mut buf, 30_000).await?;
-    buf
-  };
-
-  let incoming_keyfinder = {
-    let mut buf = [0u8; 16];
-    asyncread_readexact_timeout(&mut read_sock, &mut buf, 30_000).await?;
-    buf
-  };
-
-  let mut found_key = None;
-
-  for key in keys {
-    let expected_keyfinder = multigimli3(&key, &incoming_iv, b"keyfinder");
-
-    if expected_keyfinder == incoming_keyfinder {
-      found_key = Some(key);
-      break;
-    }
-  }
-
-  if found_key.is_none() {
-    return Err("Got incorrect keyfinder".into());
-  }
-
-  let found_key = found_key.unwrap();
-
-  let recv_enc_key = multigimli3(&found_key, &incoming_iv, b"enc_key");
-  let recv_mac_key = multigimli3(&found_key, &incoming_iv, b"mac_key");
-
-  // Send our keyfinder
-  let send_iv = {
-    let mut iv = Vec::with_capacity(16);
-    iv.extend_from_slice(&crate::rng::u64().to_le_bytes());
-    iv.extend_from_slice(&crate::rng::u64().to_le_bytes());
-    iv
-  };
-
-  let send_keyfinder = multigimli3(&found_key, &send_iv, b"keyfinder");
-
-  asyncwrite_writeall_timeout(&mut write_sock, &send_iv, 30_000).await?;
-  asyncwrite_writeall_timeout(&mut write_sock, &send_keyfinder, 30_000).await?;
-  write_sock.flush().await?;
-
-  let send_enc_key = multigimli3(&found_key, &send_iv, b"enc_key");
-  let send_mac_key = multigimli3(&found_key, &send_iv, b"mac_key");
-
-  let (sender_tx, mut sender_rx) = unbounded::<Bytes>();
-  all_senders.add(sender_tx.clone());
-
-  let sender_task = {
-    async move {
-      let mut write_sock_bufwriter = futures::io::BufWriter::new(write_sock);
-      let mut keystream = KeystreamGen::new(&send_enc_key);
-      let mut packet_data = BytesMut::with_capacity(2048);
-
-      loop {
-        leo_async::yield_now().await;
-        let Some(packet) = sender_rx.next().await else {
-          return;
-        };
-        // Empty data means there is a cleaner checking the channel
-        if packet.is_empty() {
-          continue;
-        }
-
-        let mac = multigimli2(&send_mac_key, &packet);
-
-        packet_data.reserve(2 + packet.len() + 16);
-
-        packet_data.extend_from_slice(&(packet.len() as u16).to_le_bytes());
-        packet_data.extend_from_slice(&packet);
-        packet_data.extend_from_slice(&mac);
-
-        for byte in packet_data.iter_mut() {
-          *byte ^= keystream.next();
-        }
-
-        let to_send = packet_data.split_to(packet_data.len()).freeze();
-
-        match asyncwrite_writeall_timeout(&mut write_sock_bufwriter, &to_send, 30_000).await {
-          Ok(_) => {}
-          Err(_) => return,
-        }
-
-        match write_sock_bufwriter.flush().await {
-          Ok(_) => {}
-          Err(e) => {
-            crate::log!("handle_connection sender_task flush error: {}", e);
-            return;
-          }
-        }
-      }
-    }
-  };
-
-  let recv_task = {
-    async move {
-      let mut read_sock_bufreader = futures::io::BufReader::new(read_sock);
-      let mut keystream = KeystreamGen::new(&recv_enc_key);
-      let mut data = BytesMut::with_capacity(2048);
-
-      loop {
-        leo_async::yield_now().await;
-        // Read and decrypt length
-        let mut len_buf = [0u8; 2];
-        asyncread_readexact_timeout(&mut read_sock_bufreader, &mut len_buf, 30_000).await?;
-        len_buf[0] ^= keystream.next();
-        len_buf[1] ^= keystream.next();
-        let len = u16::from_le_bytes(len_buf);
-
-        // Read and decrypt data
-        data.resize(len as usize, 0);
-        asyncread_readexact_timeout(&mut read_sock_bufreader, &mut data, 30_000).await?;
-        for byte in data.iter_mut() {
-          *byte ^= keystream.next();
-        }
-
-        // Read and decrypt MAC
-        let mut mac = [0u8; 16];
-        asyncread_readexact_timeout(&mut read_sock_bufreader, &mut mac, 30_000).await?;
-        for byte in &mut mac {
-          *byte ^= keystream.next();
-        }
-
-        // Verify MAC
-        let expected_mac = multigimli2(&recv_mac_key, &data);
-
-        if expected_mac != mac {
-          return Err("MAC verification failed".into());
-        }
-
-        let to_send = data.split_to(data.len()).freeze();
-        if let Err(err) = incoming.unbounded_send((to_send, sender_tx.clone())) {
-          log!("Error sending data: {:?}", err);
-          break;
-        }
-      }
-
-      DSSResult::Ok(())
-    }
-  };
-
-  let res = leo_async::select2_noresult(std::pin::pin!(sender_task), std::pin::pin!(recv_task)).await;
-
-  crate::log!("Connection tasks completed: {:?}", res);
-
-  Ok(())
+  run_link(&conn, &keys, false, incoming).await
 }
 
 pub async fn listener_impl(
@@ -544,11 +322,7 @@ pub async fn listener_impl(
   }
 }
 
-pub fn listener(
-  port: u16,
-  keys: Vec<Vec<u8>>,
-  incoming: UnboundedSender<(Bytes, UnboundedSender<Bytes>)>,
-) {
+pub fn listener(port: u16, keys: Vec<Vec<u8>>, incoming: UnboundedSender<(Bytes, UnboundedSender<Bytes>)>) {
   leo_async::spawn(async move {
     loop {
       let incoming = incoming.clone();
