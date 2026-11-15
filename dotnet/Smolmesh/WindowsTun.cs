@@ -1,3 +1,4 @@
+using Serilog;
 using System.ComponentModel;
 using System.Net;
 using System.Reflection;
@@ -51,6 +52,16 @@ internal sealed class WindowsTun : ITun
 
     internal async Task ConfigureAsync(IPAddress[] addresses, CancellationToken token)
     {
+        foreach (string family in new[] { "ipv4", "ipv6" })
+        {
+            // The node works with the default MTU too, only with fragmented UDP transports.
+            try
+            {
+                await Tun.CommandAsync("netsh", token, "interface", family, "set", "subinterface",
+                    $"interface={name}", $"mtu={Tun.Mtu}", "store=active");
+            }
+            catch (IOException ex) { Log.Warning("Setting the {Family} MTU: {Message}", family, ex.Message); }
+        }
         foreach (var address in addresses)
         {
             if (Tun.IsV4(address))

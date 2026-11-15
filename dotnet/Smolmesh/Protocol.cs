@@ -8,6 +8,9 @@ namespace Smolmesh;
 
 internal static class Protocol
 {
+    // Commands run from 0 (node name tracer) to this one (trace reply).
+    internal const byte LastCommand = 5;
+
     internal static ulong Millis => (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
     internal static (ulong X, ulong Y) SpeckRound(ulong x, ulong y, ulong key)

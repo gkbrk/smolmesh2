@@ -41,9 +41,9 @@ internal sealed class Configuration
                 throw new InvalidDataException("Every transport needs a port between 1 and 65535.");
             switch (transport.Type)
             {
-                case "legacy_tcp_connect" when !string.IsNullOrWhiteSpace(transport.Host) && transport.Key is not null:
+                case "legacy_tcp_connect" or "udp1_connect" when !string.IsNullOrWhiteSpace(transport.Host) && transport.Key is not null:
                     break;
-                case "legacy_tcp_listen" when transport.Keys is { Length: > 0 } && transport.Keys.All(k => k is not null):
+                case "legacy_tcp_listen" or "udp1_listen" when transport.Keys is { Length: > 0 } && transport.Keys.All(k => k is not null):
                     break;
                 default:
                     throw new InvalidDataException($"Invalid transport configuration: {transport.Type}");

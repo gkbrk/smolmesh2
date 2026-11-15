@@ -13,6 +13,10 @@ internal interface ITun : IDisposable
 
 internal static class Tun
 {
+    // As WireGuard: a full-size packet, its mesh header and the UDP and IPv6 headers around it
+    // fit a 1500-byte link with room to spare, so UDP transports need not fragment.
+    internal const int Mtu = 1420;
+
     internal static async Task<ITun?> OpenAsync(Configuration config, IPAddress nodeAddress, CancellationToken token)
     {
         ITun? tun = config.LinuxTun || config.MacTun ? UnixTun.Open()

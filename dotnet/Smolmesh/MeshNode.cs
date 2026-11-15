@@ -37,9 +37,13 @@ internal sealed class MeshNode
         try
         {
             foreach (var transport in config.Transports)
-                tasks.Add(transport.Type == "legacy_tcp_connect"
-                    ? LegacyTcp.ConnectLoopAsync(transport, routing, incoming.Writer, stop.Token)
-                    : LegacyTcp.ListenAsync(transport, routing, incoming.Writer, stop.Token));
+                tasks.Add(transport.Type switch
+                {
+                    "legacy_tcp_connect" => LegacyTcp.ConnectLoopAsync(transport, routing, incoming.Writer, stop.Token),
+                    "udp1_connect" => UdpTransport1.ConnectAsync(transport, routing, incoming.Writer, stop.Token),
+                    "udp1_listen" => UdpTransport1.ListenAsync(transport, routing, incoming.Writer, stop.Token),
+                    _ => LegacyTcp.ListenAsync(transport, routing, incoming.Writer, stop.Token)
+                });
             tasks.Add(AnnounceAsync(0, Encoding.UTF8.GetBytes(config.NodeName), stop.Token));
             foreach (string address in config.IPv4Addresses)
                 tasks.Add(AnnounceAsync(2, IPAddress.Parse(address).GetAddressBytes(), stop.Token));

@@ -66,8 +66,8 @@ internal sealed class UnixTun : ITun
 
     internal async Task ConfigureAsync(IPAddress[] addresses, CancellationToken token)
     {
-        if (mac) await Tun.CommandAsync("ifconfig", token, name, "up");
-        else await Tun.CommandAsync("ip", token, "link", "set", "dev", name, "up");
+        if (mac) await Tun.CommandAsync("ifconfig", token, name, "mtu", $"{Tun.Mtu}", "up");
+        else await Tun.CommandAsync("ip", token, "link", "set", "dev", name, "mtu", $"{Tun.Mtu}", "up");
         foreach (var address in addresses)
         {
             bool v4 = Tun.IsV4(address);

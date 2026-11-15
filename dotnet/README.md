@@ -54,6 +54,38 @@ the binary can use it to get root, for example by changing `PATH` or setting
 - If a listener can't bind its port, the node exits with an error. Rust keeps
   retrying.
 - On macOS, the `ipv4_addresses` are added to the interface too.
+- The TUN interface has an MTU of 1420, so that packets fit one UDP datagram.
+- The `udp1_listen` and `udp1_connect` transports, below. Rust nodes don't have
+  them.
+
+## UDP transport
+
+`udp1_listen` and `udp1_connect` take the same fields as their `legacy_tcp`
+counterparts and link two .NET nodes over UDP:
+
+```json
+{ "type": "udp1_listen", "port": 6969, "keys": ["secret for rath"] }
+{ "type": "udp1_connect", "host": "203.0.113.5", "port": 6969, "key": "secret for rath" }
+```
+
+Each mesh packet is one datagram: the packet enciphered with LION
+(`Crypto/Lion.cs`) under a key derived from the shared secret. The datagram is
+exactly as long as the packet and looks like random bytes. There is no
+handshake, nonce, tag or keepalive. LION needs at least 17 bytes, so the few
+packets shorter than that (announcements of an IPv4 address or of a name under
+8 bytes) are filled up to 17.
+
+- Each key on a listener stands for one neighbour. Two nodes connecting with
+  the same key take the link from each other.
+- The listener learns a neighbour's address from its datagrams and follows it
+  when the address changes. A link that hears nothing for 30 seconds is
+  dropped until the neighbour is heard again.
+- A node can have TCP and UDP links to the same neighbour. Routes then follow
+  whichever link delivers announcements first, and the other is the fallback.
+- A datagram is authenticated only by decrypting to a mesh packet with a
+  current timestamp. A captured datagram can be replayed for as long as its
+  timestamp is accepted, three minutes, once the mesh has forgotten the packet.
+- The cipher has had no outside review.
 
 ## TUN interface requirements
 

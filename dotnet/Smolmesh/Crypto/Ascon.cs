@@ -240,6 +240,18 @@ internal struct Ascon
         return false;
     }
 
+    // XORs data with the AEAD's keystream for this key and nonce: the ciphertext of zeros with no
+    // associated data, without the tag. For constructions that need a plain stream cipher (Lion).
+    internal static void XorKeystream(ReadOnlySpan<byte> key, ReadOnlySpan<byte> nonce, Span<byte> data)
+    {
+        var state = Start(key, nonce, default, out _, out _);
+        Span<byte> tail = data[state.KeystreamBlocks(data)..];
+        Span<byte> block = stackalloc byte[AeadRate];
+        BinaryPrimitives.WriteUInt64LittleEndian(block, state.X0);
+        BinaryPrimitives.WriteUInt64LittleEndian(block[8..], state.X1);
+        for (int i = 0; i < tail.Length; i++) tail[i] ^= block[i];
+    }
+
     private static Ascon Start(ReadOnlySpan<byte> key, ReadOnlySpan<byte> nonce, ReadOnlySpan<byte> associatedData,
         out ulong k0, out ulong k1)
     {
@@ -308,7 +320,23 @@ internal struct Ascon
         X1 ^= p1 ^ Pad(n - 8);
     }
 
-    // The three block loops below each handle every whole 16-byte block and return its byte count.
+    // The four block loops below each handle every whole 16-byte block and return its byte count.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private int KeystreamBlocks(Span<byte> data)
+    {
+        ulong x0 = X0, x1 = X1, x2 = X2, x3 = X3, x4 = X4;
+        int offset = 0;
+        for (; data.Length - offset >= AeadRate; offset += AeadRate)
+        {
+            BinaryPrimitives.WriteUInt64LittleEndian(data[offset..], BinaryPrimitives.ReadUInt64LittleEndian(data[offset..]) ^ x0);
+            BinaryPrimitives.WriteUInt64LittleEndian(data[(offset + 8)..],
+                BinaryPrimitives.ReadUInt64LittleEndian(data[(offset + 8)..]) ^ x1);
+            (x0, x1, x2, x3, x4) = Rounds8(x0, x1, x2, x3, x4);
+        }
+        (X0, X1, X2, X3, X4) = (x0, x1, x2, x3, x4);
+        return offset;
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     private int AbsorbBlocks(ReadOnlySpan<byte> input)
     {
