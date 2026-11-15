@@ -17,6 +17,10 @@ internal static class LegacyTcp
     internal const int BufferSize = 64 * 1024;
     // Each frame is the 2-byte length and the packet, encrypted together, then the stream's tag.
     private const int FrameOverhead = 2 + AsconStream.TagSize;
+    // Kernel auto-tuning stops at 4 MB with common defaults (Linux net.ipv4.tcp_wmem, macOS
+    // net.inet.tcp.autorcvbufmax): about 200 Mbit/s at the 160 ms of a loaded long link.
+    // 7 MB stays under macOS's default kern.ipc.maxsockbuf of 8 MB less mbuf overhead.
+    internal const int SocketBufferSize = 7 * 1024 * 1024;
 
     internal static async Task ConnectLoopAsync(TransportConfiguration config, Routing routing,
         ChannelWriter<(byte[] Packet, Peer Peer)> incoming, CancellationToken token)
@@ -26,6 +30,7 @@ internal static class LegacyTcp
             try
             {
                 using var client = new TcpClient();
+                SizeBuffers(client.Client);
                 using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(token))
                 {
                     timeout.CancelAfter(TimeSpan.FromSeconds(5));
@@ -84,6 +89,7 @@ internal static class LegacyTcp
             {
                 listener = new TcpListener(IPAddress.IPv6Any, port);
                 listener.Server.DualMode = true;
+                SizeBuffers(listener.Server);
                 listener.Start(128);
                 return listener;
             }
@@ -95,8 +101,35 @@ internal static class LegacyTcp
             }
         }
         var ipv4 = new TcpListener(IPAddress.Any, port);
+        SizeBuffers(ipv4.Server);
         ipv4.Start(128);
         return ipv4;
+    }
+
+    // Before connecting or listening: the receive window's scale is fixed at the handshake, and
+    // accepted sockets inherit the listener's buffers. A fixed size turns auto-tuning off.
+    internal static void SizeBuffers(Socket socket)
+    {
+        try
+        {
+            if (OperatingSystem.IsLinux())
+            {
+                // Plain SO_SNDBUF/SO_RCVBUF are capped at net.core.[rw]mem_max, often 208 KB, far below
+                // auto-tuning; SO_SNDBUFFORCE/SO_RCVBUFFORCE need root, which the TUN already does.
+                byte[] size = BitConverter.GetBytes(SocketBufferSize);
+                socket.SetRawSocketOption(1, 32, size);
+                socket.SetRawSocketOption(1, 33, size);
+            }
+            else if (OperatingSystem.IsMacOS())
+            {
+                socket.SendBufferSize = SocketBufferSize;
+                socket.ReceiveBufferSize = SocketBufferSize;
+            }
+        }
+        catch (SocketException ex)
+        {
+            Log.Warning("Socket buffers left to the system: {Message}", ex.Message);
+        }
     }
 
     // Shows IPv4 peers of a dual-mode listener as a.b.c.d instead of ::ffff:a.b.c.d.

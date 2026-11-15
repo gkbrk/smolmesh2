@@ -102,6 +102,28 @@ public class LegacyTcpTests
         finally { listener.Stop(); }
     }
 
+    [Fact]
+    public async Task ConnectionsUseLargeSocketBuffers()
+    {
+        // Linux needs root for the FORCE options; other systems keep their own sizing.
+        if (!OperatingSystem.IsMacOS() && !(OperatingSystem.IsLinux() && Environment.IsPrivilegedProcess)) return;
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var listener = LegacyTcp.Listen(0);
+        try
+        {
+            using var client = new TcpClient();
+            LegacyTcp.SizeBuffers(client.Client);
+            await client.ConnectAsync("localhost", ((IPEndPoint)listener.LocalEndpoint).Port, stop.Token);
+            using var server = await listener.AcceptTcpClientAsync(stop.Token);
+            foreach (Socket socket in new[] { client.Client, server.Client })
+            {
+                Assert.True(socket.SendBufferSize >= LegacyTcp.SocketBufferSize);
+                Assert.True(socket.ReceiveBufferSize >= LegacyTcp.SocketBufferSize);
+            }
+        }
+        finally { listener.Stop(); }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
