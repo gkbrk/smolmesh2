@@ -12,17 +12,25 @@ internal static class Control
         using var listener = new HttpListener();
         listener.Prefixes.Add($"http://127.0.0.1:{port}/");
         listener.Start();
-        await using var _ = token.Register(listener.Stop);
+        await using var registration = token.Register(listener.Stop);
         while (!token.IsCancellationRequested)
         {
             HttpListenerContext context;
             try { context = await listener.GetContextAsync(); }
             catch (Exception) when (token.IsCancellationRequested) { return; }
-            await RespondAsync(context, peers, trace);
+            // Not awaited: a 3 second /trace must not hold up /status.
+            _ = RespondAsync(context, peers, trace);
         }
     }
 
     private static async Task RespondAsync(HttpListenerContext context, Func<object> peers, Func<string, Task<string>> trace)
+    {
+        // Nobody awaits this task, so a client that hung up must not become an unobserved exception.
+        try { await RespondCoreAsync(context, peers, trace); }
+        catch (Exception ex) when (ex is HttpListenerException or IOException or ObjectDisposedException) { }
+    }
+
+    private static async Task RespondCoreAsync(HttpListenerContext context, Func<object> peers, Func<string, Task<string>> trace)
     {
         using var response = context.Response;
         string? path = context.Request is { HttpMethod: "GET" } request ? request.Url?.AbsolutePath : null;

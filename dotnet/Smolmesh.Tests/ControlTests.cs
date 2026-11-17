@@ -27,6 +27,23 @@ public class ControlTests
     }
 
     [Fact]
+    public async Task StatusAnswersWhileATraceIsWaiting()
+    {
+        int port = FreePort();
+        using var stop = new CancellationTokenSource();
+        var release = new TaskCompletionSource<string>();
+        Task server = Control.ListenAsync(port, () => Array.Empty<object>(), _ => release.Task, stop.Token);
+        using var http = new HttpClient();
+        Task<string> slow = http.GetStringAsync($"http://127.0.0.1:{port}/trace/x");
+        Assert.Equal("Ok.", await Control.StatusAsync(port, default));
+        Assert.False(slow.IsCompleted);
+        release.SetResult("done");
+        Assert.Equal("\"done\"", await slow);
+        await stop.CancelAsync();
+        await server;
+    }
+
+    [Fact]
     public async Task StatusFailsWhenNodeIsDown() =>
         await Assert.ThrowsAnyAsync<HttpRequestException>(() => Control.StatusAsync(FreePort(), default));
 }
