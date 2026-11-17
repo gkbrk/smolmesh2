@@ -13,6 +13,7 @@ namespace Smolmesh;
 internal static class LegacyTcp
 {
     internal static readonly TimeSpan IoTimeout = TimeSpan.FromSeconds(30);
+    internal static readonly TimeSpan HandshakeTimeout = TimeSpan.FromSeconds(5);
     // Size of the receive buffer, and how much the send loop gathers before one socket write.
     internal const int BufferSize = 64 * 1024;
     // Each frame is the 2-byte length and the packet, encrypted together, then the stream's tag.
@@ -160,22 +161,27 @@ internal static class LegacyTcp
         byte[] receiveIv = new byte[16];
         byte[] keyfinder = new byte[16];
         byte[] key;
-        if (initiator)
+        // Short, so connections that never authenticate can't hold sockets for the full IoTimeout.
+        using (var handshake = CancellationTokenSource.CreateLinkedTokenSource(token))
         {
-            key = keys[0];
-            await WriteHandshakeAsync(stream, key, sendIv, token);
-            await ReadAsync(reader, receiveIv, token);
-            await ReadAsync(reader, keyfinder, token);
-            if (!CryptographicOperations.FixedTimeEquals(Derive(key, receiveIv, "keyfinder"), keyfinder))
-                throw new IOException("Incorrect keyfinder.");
-        }
-        else
-        {
-            await ReadAsync(reader, receiveIv, token);
-            await ReadAsync(reader, keyfinder, token);
-            key = keys.FirstOrDefault(k => CryptographicOperations.FixedTimeEquals(Derive(k, receiveIv, "keyfinder"), keyfinder))
-                ?? throw new IOException("Incorrect keyfinder.");
-            await WriteHandshakeAsync(stream, key, sendIv, token);
+            handshake.CancelAfter(HandshakeTimeout);
+            if (initiator)
+            {
+                key = keys[0];
+                await WriteHandshakeAsync(stream, key, sendIv, handshake.Token);
+                await ReadAsync(reader, receiveIv, handshake.Token);
+                await ReadAsync(reader, keyfinder, handshake.Token);
+                if (!CryptographicOperations.FixedTimeEquals(Derive(key, receiveIv, "keyfinder"), keyfinder))
+                    throw new IOException("Incorrect keyfinder.");
+            }
+            else
+            {
+                await ReadAsync(reader, receiveIv, handshake.Token);
+                await ReadAsync(reader, keyfinder, handshake.Token);
+                key = keys.FirstOrDefault(k => CryptographicOperations.FixedTimeEquals(Derive(k, receiveIv, "keyfinder"), keyfinder))
+                    ?? throw new IOException("Incorrect keyfinder.");
+                await WriteHandshakeAsync(stream, key, sendIv, handshake.Token);
+            }
         }
 
         var peer = new Peer();
