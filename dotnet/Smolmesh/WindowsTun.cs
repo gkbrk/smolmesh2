@@ -77,27 +77,35 @@ internal sealed class WindowsTun : ITun
         "interface", Tun.IsV4(address) ? "ipv4" : "ipv6", "add", "route",
         $"prefix={address}/{(Tun.IsV4(address) ? 32 : 128)}", $"interface={name}", "store=active");
 
-    public Task<byte[]> ReadAsync(CancellationToken token) => Task.Run(() =>
+    public Task<byte[]> ReadAsync(CancellationToken token)
     {
-        while (true)
+        token.ThrowIfCancellationRequested();
+        // Under load a packet is usually waiting, which saves the thread hop.
+        return TryRead() is { } waiting ? Task.FromResult(waiting) : Task.Run(() =>
         {
-            token.ThrowIfCancellationRequested();
-            nint packet = Native.WintunReceivePacket(session, out uint size);
-            if (packet != 0)
+            while (true)
             {
-                try
-                {
-                    byte[] result = new byte[checked((int)size)];
-                    Marshal.Copy(packet, result, 0, result.Length);
-                    return result;
-                }
-                finally { Native.WintunReleaseReceivePacket(session, packet); }
+                token.ThrowIfCancellationRequested();
+                uint wait = Native.WaitForSingleObject(readEvent, 200);
+                if (wait is not (0 or 258)) throw Error("Waiting for Wintun packets");
+                if (TryRead() is { } packet) return packet;
             }
-            if (Marshal.GetLastPInvokeError() != 259) throw Error("WintunReceivePacket");
-            uint wait = Native.WaitForSingleObject(readEvent, 200);
-            if (wait is not (0 or 258)) throw Error("Waiting for Wintun packets");
+        }, token);
+    }
+
+    /// <summary>Returns null when no packet is waiting.</summary>
+    private byte[]? TryRead()
+    {
+        nint packet = Native.WintunReceivePacket(session, out uint size);
+        if (packet == 0) return Marshal.GetLastPInvokeError() == 259 ? null : throw Error("WintunReceivePacket");
+        try
+        {
+            byte[] result = new byte[checked((int)size)];
+            Marshal.Copy(packet, result, 0, result.Length);
+            return result;
         }
-    }, token);
+        finally { Native.WintunReleaseReceivePacket(session, packet); }
+    }
 
     public async Task WriteAsync(ReadOnlyMemory<byte> packet, CancellationToken token)
     {
