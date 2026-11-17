@@ -65,4 +65,19 @@ public class RoutingTests
         Assert.False(routes.Learn(1, IPAddress.Parse("192.0.2.1"), peer));
         Assert.True(routes.Learn(2, new IPAddress(0), peer)); // Known addresses still update.
     }
+
+    [Fact]
+    public void QuietRoutesExpire()
+    {
+        var routes = new Routing();
+        var peer = new Peer();
+        routes.Add(peer);
+        var address = IPAddress.Parse("192.0.2.1");
+        routes.Learn(100, address, peer);
+        routes.Expire(100 + Routing.IdleMillis);
+        Assert.True(routes.Has(address));
+        routes.Expire(101 + Routing.IdleMillis);
+        Assert.False(routes.Has(address));
+        Assert.True(routes.Learn(50, address, peer)); // Forgotten, so even an older announcement is new.
+    }
 }

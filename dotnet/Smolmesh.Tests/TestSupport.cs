@@ -10,7 +10,7 @@ internal sealed class FakeTun : ITun
     internal readonly List<byte[]> Written = [];
     public Task<byte[]> ReadAsync(CancellationToken token) => throw new NotSupportedException();
     public Task WriteAsync(ReadOnlyMemory<byte> packet, CancellationToken token) { Written.Add(packet.ToArray()); return Task.CompletedTask; }
-    public Task AddRouteAsync(IPAddress address, CancellationToken token) => Task.CompletedTask;
+    public Task RouteAsync(IPAddress address, bool add, CancellationToken token) => Task.CompletedTask;
     public void Dispose() { }
 }
 

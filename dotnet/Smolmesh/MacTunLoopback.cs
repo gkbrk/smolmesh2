@@ -25,7 +25,7 @@ internal sealed class MacTunLoopback(ITun inner, IPAddress ownAddress) : ITun
 
     public Task WriteAsync(ReadOnlyMemory<byte> packet, CancellationToken token) => inner.WriteAsync(packet, token);
 
-    public Task AddRouteAsync(IPAddress address, CancellationToken token) => inner.AddRouteAsync(address, token);
+    public Task RouteAsync(IPAddress address, bool add, CancellationToken token) => inner.RouteAsync(address, add, token);
 
     public void Dispose() => inner.Dispose();
 

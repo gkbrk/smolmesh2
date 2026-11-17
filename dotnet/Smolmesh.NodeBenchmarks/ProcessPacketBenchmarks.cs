@@ -80,7 +80,7 @@ public class ProcessPacketBenchmarks
         internal int Writes;
         public Task<byte[]> ReadAsync(CancellationToken token) => throw new NotSupportedException();
         public Task WriteAsync(ReadOnlyMemory<byte> packet, CancellationToken token) { Writes++; return Task.CompletedTask; }
-        public Task AddRouteAsync(IPAddress address, CancellationToken token) => Task.CompletedTask;
+        public Task RouteAsync(IPAddress address, bool add, CancellationToken token) => Task.CompletedTask;
         public void Dispose() { }
     }
 }

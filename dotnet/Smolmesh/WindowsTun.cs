@@ -73,8 +73,8 @@ internal sealed class WindowsTun : ITun
         }
     }
 
-    public Task AddRouteAsync(IPAddress address, CancellationToken token) => Tun.CommandAsync("netsh", token,
-        "interface", Tun.IsV4(address) ? "ipv4" : "ipv6", "add", "route",
+    public Task RouteAsync(IPAddress address, bool add, CancellationToken token) => Tun.CommandAsync("netsh", token,
+        "interface", Tun.IsV4(address) ? "ipv4" : "ipv6", add ? "add" : "delete", "route",
         $"prefix={address}/{(Tun.IsV4(address) ? 32 : 128)}", $"interface={name}", "store=active");
 
     public Task<byte[]> ReadAsync(CancellationToken token)

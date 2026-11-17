@@ -18,7 +18,8 @@ internal sealed class MeshNode
     private readonly HashSet<IPAddress> ourAddresses;
     private readonly Channel<(byte[] Packet, Peer Peer)> incoming = Channel.CreateBounded<(byte[], Peer)>(1024);
     private readonly ConcurrentDictionary<string, (IPAddress Address, long Tick)> peers = new();
-    private readonly Channel<IPAddress> routeRequests = Channel.CreateBounded<IPAddress>(1024);
+    // An address that was announced, or null: time to remove the kernel routes the node no longer has.
+    private readonly Channel<IPAddress?> routeRequests = Channel.CreateBounded<IPAddress?>(1024);
 
     internal MeshNode(Configuration config)
     {
@@ -47,6 +48,7 @@ internal sealed class MeshNode
             foreach (string address in config.IPv4Addresses)
                 tasks.Add(AnnounceAsync(2, IPAddress.Parse(address).GetAddressBytes(), stop.Token));
             tasks.Add(ProcessAsync(tun, stop.Token));
+            tasks.Add(ExpireAsync(tun is not null, stop.Token));
             if (config.ControlPort > 0) tasks.Add(Control.ListenAsync(config.ControlPort, Peers, Trace, stop.Token));
             if (tun is not null)
             {
@@ -64,10 +66,7 @@ internal sealed class MeshNode
         }
     }
 
-    // A name not heard for this long is no longer listed, and is forgotten when the list is full.
-    private const long PeerTimeout = 3_600_000;
-
-    private object Peers() => peers.Where(p => Environment.TickCount64 - p.Value.Tick < PeerTimeout).Select(p => new
+    private object Peers() => peers.Select(p => new
     {
         name = p.Key,
         address = Protocol.FormatAddress(p.Value.Address),
@@ -181,18 +180,26 @@ internal sealed class MeshNode
         if (!routing.Learn(timestamp, address, peer)) return;
         if (nodeName is not null)
         {
-            long now = Environment.TickCount64;
-            bool known = peers.ContainsKey(nodeName);
-            if (!known && peers.Count >= Routing.MaxRoutes)
-                foreach (var old in peers)
-                    if (now - old.Value.Tick >= PeerTimeout) peers.TryRemove(old.Key, out _);
-            if (known || peers.Count < Routing.MaxRoutes) peers[nodeName] = (address, now);
+            if (peers.Count < Routing.MaxRoutes || peers.ContainsKey(nodeName)) peers[nodeName] = (address, Environment.TickCount64);
             // JSON quoting keeps peer-controlled names on one log line.
             Log.Information("Received node tracer: {NodeName:l} ({Address})", JsonSerializer.Serialize(nodeName), Protocol.FormatAddress(address));
         }
         else Log.Information("Received IPv{Version} tracer: {Address}", packet[8] == 1 ? 6 : 4, Protocol.FormatAddress(address));
         routing.Broadcast(packet);
         if (tun is not null) routeRequests.Writer.TryWrite(address);
+    }
+
+    // Every minute, forgets the routes and names that have been quiet for Routing.IdleMillis.
+    private async Task ExpireAsync(bool kernelRoutes, CancellationToken token)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromMinutes(1));
+        while (await timer.WaitForNextTickAsync(token))
+        {
+            routing.Expire(Protocol.Millis);
+            foreach (var peer in peers)
+                if (Environment.TickCount64 - peer.Value.Tick > (long)Routing.IdleMillis) peers.TryRemove(peer.Key, out _);
+            if (kernelRoutes) routeRequests.Writer.TryWrite(null);
+        }
     }
 
     private async Task ReadTunAsync(ITun tun, CancellationToken token)
@@ -211,14 +218,20 @@ internal sealed class MeshNode
         HashSet<IPAddress> added = [];
         await foreach (var address in routeRequests.Reader.ReadAllAsync(token))
         {
+            // Gone from routing: expired, or lost with their link. One that comes back is added again.
+            if (address is null)
+                foreach (var gone in added.Where(a => !routing.Has(a)).ToArray())
+                {
+                    added.Remove(gone);
+                    await Try(gone, false);
+                }
             // Added before trying, so a route that fails is logged once, not after every announcement.
-            // shortcut: kernel routes are never removed, so after MaxRoutes addresses new ones get none
-            // until a restart; remove the routes of expired addresses if a mesh ever churns that much.
-            if (added.Count >= Routing.MaxRoutes || !added.Add(address)) continue;
-            try
-            {
-                await tun.AddRouteAsync(address, token);
-            }
+            else if (added.Count < Routing.MaxRoutes && added.Add(address)) await Try(address, true);
+        }
+
+        async Task Try(IPAddress address, bool add)
+        {
+            try { await tun.RouteAsync(address, add, token); }
             catch (Exception ex) when (!token.IsCancellationRequested)
             {
                 Log.Warning("Route for {Address}: {Message}", address, ex.Message);

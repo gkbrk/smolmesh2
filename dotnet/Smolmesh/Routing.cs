@@ -30,6 +30,8 @@ internal sealed class Routing
     // Addresses are peer-controlled, so what a node remembers of them is bounded: far more than
     // any mesh we run, and past it new ones are ignored.
     internal const int MaxRoutes = 4096;
+    // A route not announced for this long is removed. Nodes announce every 10 seconds at most.
+    internal const ulong IdleMillis = 600_000;
 
     private readonly object gate = new();
     private readonly HashSet<Peer> peers = [];
@@ -59,6 +61,15 @@ internal sealed class Routing
             return true;
         }
     }
+
+    internal void Expire(ulong now)
+    {
+        lock (gate)
+            foreach (var address in routes.Where(r => r.Value.Timestamp + IdleMillis < now).Select(r => r.Key).ToArray())
+                routes.Remove(address);
+    }
+
+    internal bool Has(IPAddress address) { lock (gate) return routes.ContainsKey(address); }
 
     internal void Broadcast(byte[] packet)
     {

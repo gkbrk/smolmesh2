@@ -8,7 +8,7 @@ internal interface ITun : IDisposable
 {
     Task<byte[]> ReadAsync(CancellationToken token);
     Task WriteAsync(ReadOnlyMemory<byte> packet, CancellationToken token);
-    Task AddRouteAsync(IPAddress address, CancellationToken token);
+    Task RouteAsync(IPAddress address, bool add, CancellationToken token);
 }
 
 internal static class Tun

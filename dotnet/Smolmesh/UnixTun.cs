@@ -81,12 +81,12 @@ internal sealed class UnixTun : ITun
         }
     }
 
-    public Task AddRouteAsync(IPAddress address, CancellationToken token)
+    public Task RouteAsync(IPAddress address, bool add, CancellationToken token)
     {
         bool v4 = Tun.IsV4(address);
         return mac
-            ? Tun.CommandAsync("route", token, "add", v4 ? "-inet" : "-inet6", "-host", address.ToString(), "-interface", name)
-            : Tun.CommandAsync("ip", token, v4 ? "-4" : "-6", "route", "replace", $"{address}/{(v4 ? 32 : 128)}", "dev", name);
+            ? Tun.CommandAsync("route", token, add ? "add" : "delete", v4 ? "-inet" : "-inet6", "-host", address.ToString(), "-interface", name)
+            : Tun.CommandAsync("ip", token, v4 ? "-4" : "-6", "route", add ? "replace" : "del", $"{address}/{(v4 ? 32 : 128)}", "dev", name);
     }
 
     // One read at a time: the buffer is shared between calls.
