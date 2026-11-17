@@ -57,7 +57,15 @@ internal static class LegacyTcp
             byte[][] keys = config.Keys.Select(Encoding.UTF8.GetBytes).ToArray();
             while (true)
             {
-                var client = await listener.AcceptTcpClientAsync(token);
+                TcpClient client;
+                try { client = await listener.AcceptTcpClientAsync(token); }
+                catch (SocketException ex)
+                {
+                    // Out of file handles, or a connection reset before accept: wait, don't exit the node.
+                    Log.Warning("Accept on port {Port}: {Message}", config.Port, ex.Message);
+                    await Task.Delay(TimeSpan.FromSeconds(1), token);
+                    continue;
+                }
                 connections.RemoveWhere(t => t.IsCompleted);
                 connections.Add(HandleAsync(client));
             }
