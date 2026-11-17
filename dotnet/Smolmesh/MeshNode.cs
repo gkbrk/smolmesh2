@@ -199,11 +199,11 @@ internal sealed class MeshNode
         HashSet<IPAddress> added = [];
         await foreach (var address in routeRequests.Reader.ReadAllAsync(token))
         {
-            if (added.Contains(address)) continue;
+            // Added before trying, so a route that fails is logged once, not after every announcement.
+            if (!added.Add(address)) continue;
             try
             {
                 await tun.AddRouteAsync(address, token);
-                added.Add(address);
             }
             catch (Exception ex) when (!token.IsCancellationRequested)
             {
