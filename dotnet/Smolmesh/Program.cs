@@ -21,6 +21,12 @@ internal static class Program
         return await RunAsync(args, stop.Token);
     }
 
+    private static int ControlPort(string? configPath)
+    {
+        int port = configPath is null ? new Configuration().ControlPort : Configuration.Load(configPath).ControlPort;
+        return port != 0 ? port : throw new InvalidOperationException("control_port is 0 (disabled) in the configuration.");
+    }
+
     internal static async Task<int> RunAsync(string[] args, CancellationToken token)
     {
         try
@@ -43,14 +49,10 @@ internal static class Program
                         """);
                     break;
                 case "status" when args.Length <= 2 && !args.Contains("--help"):
-                    int port = args.Length == 2 ? Configuration.Load(args[1]).ControlPort : new Configuration().ControlPort;
-                    if (port == 0) throw new InvalidOperationException("control_port is 0 (disabled) in the configuration.");
-                    Console.WriteLine(await Control.StatusAsync(port, token));
+                    Console.WriteLine(await Control.StatusAsync(ControlPort(args.ElementAtOrDefault(1)), token));
                     break;
                 case "peers" when args.Length <= 2:
-                    int peersPort = args.Length == 2 ? Configuration.Load(args[1]).ControlPort : new Configuration().ControlPort;
-                    if (peersPort == 0) throw new InvalidOperationException("control_port is 0 (disabled) in the configuration.");
-                    using (var doc = System.Text.Json.JsonDocument.Parse(await Control.PeersAsync(peersPort, token)))
+                    using (var doc = System.Text.Json.JsonDocument.Parse(await Control.PeersAsync(ControlPort(args.ElementAtOrDefault(1)), token)))
                     {
                         var rows = doc.RootElement.EnumerateArray().Select(p => (Name: p.GetProperty("name").GetString()!,
                             Address: p.GetProperty("address").GetString()!, Seconds: p.GetProperty("seconds").GetInt64())).ToList();
@@ -60,9 +62,7 @@ internal static class Program
                     }
                     break;
                 case "trace" when args.Length is 2 or 3:
-                    int tracePort = args.Length == 3 ? Configuration.Load(args[2]).ControlPort : new Configuration().ControlPort;
-                    if (tracePort == 0) throw new InvalidOperationException("control_port is 0 (disabled) in the configuration.");
-                    Console.Write(await Control.TraceAsync(tracePort, args[1], token));
+                    Console.Write(await Control.TraceAsync(ControlPort(args.ElementAtOrDefault(2)), args[1], token));
                     break;
                 case "name-to-ipv6" when args.Length == 2:
                     Console.WriteLine(Protocol.FormatAddress(Protocol.NodeAddress(args[1])));
