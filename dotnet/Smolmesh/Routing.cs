@@ -27,6 +27,10 @@ internal sealed class Peer
 
 internal sealed class Routing
 {
+    // Addresses are peer-controlled, so what a node remembers of them is bounded: far more than
+    // any mesh we run, and past it new ones are ignored.
+    internal const int MaxRoutes = 4096;
+
     private readonly object gate = new();
     private readonly HashSet<Peer> peers = [];
     private readonly Dictionary<IPAddress, (ulong Timestamp, Peer Peer)> routes = [];
@@ -50,7 +54,7 @@ internal sealed class Routing
         lock (gate)
         {
             if (!peers.Contains(peer)) return false;
-            if (routes.TryGetValue(address, out var old) && timestamp <= old.Timestamp) return false;
+            if (routes.TryGetValue(address, out var old) ? timestamp <= old.Timestamp : routes.Count >= MaxRoutes) return false;
             routes[address] = (timestamp, peer);
             return true;
         }

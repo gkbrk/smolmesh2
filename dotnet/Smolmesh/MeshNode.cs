@@ -64,7 +64,10 @@ internal sealed class MeshNode
         }
     }
 
-    private object Peers() => peers.Where(p => !ourAddresses.Contains(p.Value.Address)).Select(p => new
+    // A name not heard for this long is no longer listed, and is forgotten when the list is full.
+    private const long PeerTimeout = 3_600_000;
+
+    private object Peers() => peers.Where(p => Environment.TickCount64 - p.Value.Tick < PeerTimeout).Select(p => new
     {
         name = p.Key,
         address = Protocol.FormatAddress(p.Value.Address),
@@ -178,7 +181,12 @@ internal sealed class MeshNode
         if (!routing.Learn(timestamp, address, peer)) return;
         if (nodeName is not null)
         {
-            peers[nodeName] = (address, Environment.TickCount64);
+            long now = Environment.TickCount64;
+            bool known = peers.ContainsKey(nodeName);
+            if (!known && peers.Count >= Routing.MaxRoutes)
+                foreach (var old in peers)
+                    if (now - old.Value.Tick >= PeerTimeout) peers.TryRemove(old.Key, out _);
+            if (known || peers.Count < Routing.MaxRoutes) peers[nodeName] = (address, now);
             // JSON quoting keeps peer-controlled names on one log line.
             Log.Information("Received node tracer: {NodeName:l} ({Address})", JsonSerializer.Serialize(nodeName), Protocol.FormatAddress(address));
         }
@@ -204,7 +212,9 @@ internal sealed class MeshNode
         await foreach (var address in routeRequests.Reader.ReadAllAsync(token))
         {
             // Added before trying, so a route that fails is logged once, not after every announcement.
-            if (!added.Add(address)) continue;
+            // shortcut: kernel routes are never removed, so after MaxRoutes addresses new ones get none
+            // until a restart; remove the routes of expired addresses if a mesh ever churns that much.
+            if (added.Count >= Routing.MaxRoutes || !added.Add(address)) continue;
             try
             {
                 await tun.AddRouteAsync(address, token);

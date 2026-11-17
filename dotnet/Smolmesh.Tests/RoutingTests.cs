@@ -54,4 +54,15 @@ public class RoutingTests
         Assert.True(first.Outgoing.Reader.TryRead(out _));
         Assert.False(second.Outgoing.Reader.TryRead(out _));
     }
+
+    [Fact]
+    public void RoutesAreBounded()
+    {
+        var routes = new Routing();
+        var peer = new Peer();
+        routes.Add(peer);
+        for (uint i = 0; i < Routing.MaxRoutes; i++) Assert.True(routes.Learn(1, new IPAddress(i), peer));
+        Assert.False(routes.Learn(1, IPAddress.Parse("192.0.2.1"), peer));
+        Assert.True(routes.Learn(2, new IPAddress(0), peer)); // Known addresses still update.
+    }
 }
