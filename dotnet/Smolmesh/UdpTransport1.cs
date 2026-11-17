@@ -139,6 +139,8 @@ internal static class UdpTransport1
             byte[] packet = new byte[MaxDatagram];
             await foreach (var (datagram, from) in new DatagramBatch().ReceiveAllAsync(socket, stop.Token))
             {
+                // An IPv6 datagram can be longer than the buffer: ignore it, don't crash on it.
+                if (datagram.Length > MaxDatagram) continue;
                 Link? at;
                 lock (links) links.ByAddress.TryGetValue(from, out at);
                 if (at is not null && Open(at.ReceiveKey, datagram.Span, packet, out int length, out _) && packet[8] <= Protocol.LastCommand)
