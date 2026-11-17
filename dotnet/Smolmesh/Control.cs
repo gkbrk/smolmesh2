@@ -51,23 +51,21 @@ internal static class Control
     /// <summary>Asks a running node for its status; throws unless it answers "Ok.".</summary>
     internal static async Task<string> StatusAsync(int port, CancellationToken token)
     {
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-        string text = await http.GetStringAsync($"http://127.0.0.1:{port}/status", token);
+        string text = await GetAsync(port, "status", 5, token);
         string? status = JsonSerializer.Deserialize<string>(text);
         return status == "Ok." ? status : throw new InvalidDataException($"Unexpected status response: {text}");
     }
 
     /// <summary>Fetches the peer list JSON from a running node.</summary>
-    internal static async Task<string> PeersAsync(int port, CancellationToken token)
-    {
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-        return await http.GetStringAsync($"http://127.0.0.1:{port}/peers", token);
-    }
+    internal static Task<string> PeersAsync(int port, CancellationToken token) => GetAsync(port, "peers", 5, token);
 
     /// <summary>Asks a running node to trace the route to a node name; returns the plain-text hop table.</summary>
-    internal static async Task<string> TraceAsync(int port, string name, CancellationToken token)
+    internal static async Task<string> TraceAsync(int port, string name, CancellationToken token) =>
+        JsonSerializer.Deserialize<string>(await GetAsync(port, $"trace/{Uri.EscapeDataString(name)}", 10, token))!;
+
+    private static async Task<string> GetAsync(int port, string path, int seconds, CancellationToken token)
     {
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
-        return JsonSerializer.Deserialize<string>(await http.GetStringAsync($"http://127.0.0.1:{port}/trace/{Uri.EscapeDataString(name)}", token))!;
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(seconds) };
+        return await http.GetStringAsync($"http://127.0.0.1:{port}/{path}", token);
     }
 }
