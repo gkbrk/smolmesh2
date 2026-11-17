@@ -264,8 +264,8 @@ public class UdpTransport1Tests
                 Datagram(UdpTransport1.DataKey(Secret, 2, nodeId), good),                   // another link
                 Datagram(UdpTransport1.HelloKey(Secret), good),                             // the hello key
                 changed,                                                                    // modified in transit
-                Datagram(key, Protocol.Packet(0, "node"u8, Protocol.Millis - 181_000)),     // too old
-                Datagram(key, Protocol.Packet(0, "node"u8, Protocol.Millis + 181_000)),     // from the future
+                Datagram(key, Protocol.Packet(0, "node"u8, (Protocol.Millis - 181_000) << 16)),     // too old
+                Datagram(key, Protocol.Packet(0, "node"u8, (Protocol.Millis + 181_000) << 16)),     // from the future
                 Enciphered(key, Protocol.Packet(8, "a longer name"u8)),                     // no such command
                 Datagram(key, Protocol.Packet(UdpTransport1.Hello, BitConverter.GetBytes(3ul))), // a hello, but not under the hello key
                 new byte[16],                                                               // too short for LION
@@ -381,7 +381,7 @@ public class UdpTransport1Tests
         try
         {
             using UdpClient home = Client(socket), moved = Client(socket), attacker = Client(socket);
-            ulong now = Protocol.Millis;
+            ulong now = Protocol.Millis << 16;
             byte[] hello = HelloDatagram(7, now), newer = HelloDatagram(7, now + 1);
             byte[] reply = Protocol.Packet(3, new byte[40]);
 
@@ -435,7 +435,7 @@ public class UdpTransport1Tests
         try
         {
             using UdpClient client = Client(socket);
-            ulong now = Protocol.Millis;
+            ulong now = Protocol.Millis << 16;
             byte[] hello = HelloDatagram(9, now);
             ulong nodeId = await Greet(client, 9, stop.Token, now);
             byte[] key = UdpTransport1.DataKey(Secret, 9, nodeId);

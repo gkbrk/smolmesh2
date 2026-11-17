@@ -65,7 +65,7 @@ internal sealed class Routing
     internal void Expire(ulong now)
     {
         lock (gate)
-            foreach (var address in routes.Where(r => r.Value.Timestamp + IdleMillis < now).Select(r => r.Key).ToArray())
+            foreach (var address in routes.Where(r => (r.Value.Timestamp >> 16) + IdleMillis < now).Select(r => r.Key).ToArray())
                 routes.Remove(address);
     }
 

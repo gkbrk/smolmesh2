@@ -71,7 +71,7 @@ public class ProcessPacketBenchmarks
     // refreshed now and then so long runs stay inside the freshness window.
     private void Vary(byte[] packet)
     {
-        if ((counter++ & 0xffff) == 0) BinaryPrimitives.WriteUInt64LittleEndian(packet, Protocol.Millis);
+        if ((counter++ & 0xffff) == 0) BinaryPrimitives.WriteUInt64LittleEndian(packet, Protocol.Millis << 16);
         BinaryPrimitives.WriteUInt64LittleEndian(packet.AsSpan(9 + 40), counter);
     }
 

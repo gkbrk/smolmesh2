@@ -73,7 +73,7 @@ public class RoutingTests
         var peer = new Peer();
         routes.Add(peer);
         var address = IPAddress.Parse("192.0.2.1");
-        routes.Learn(100, address, peer);
+        routes.Learn(100 << 16, address, peer);
         routes.Expire(100 + Routing.IdleMillis);
         Assert.True(routes.Has(address));
         routes.Expire(101 + Routing.IdleMillis);

@@ -142,7 +142,7 @@ impl TunInterface {
 
           netpacket.reserve(8 + 1 + packet.len());
 
-          netpacket.extend_from_slice(&crate::millis().to_le_bytes());
+          netpacket.extend_from_slice(&crate::stamp().to_le_bytes());
           netpacket.put_u8(3);
           netpacket.extend_from_slice(packet);
           let to_send = netpacket.split_to(netpacket.len()).freeze();

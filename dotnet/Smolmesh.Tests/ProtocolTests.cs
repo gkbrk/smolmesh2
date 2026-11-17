@@ -40,8 +40,12 @@ public class ProtocolTests
         Assert.Equal(IPAddress.Parse("192.0.2.1"), Protocol.Destination(v4)!);
         v4[0] = 0x4f;
         Assert.Null(Protocol.Destination(v4));
-        Assert.True(Protocol.Fresh(180000, 0));
-        Assert.False(Protocol.Fresh(180001, 0));
+        Assert.True(Protocol.Fresh(180000UL << 16, 0));
+        Assert.False(Protocol.Fresh(180001UL << 16, 0));
         Assert.False(Protocol.Fresh(0, ulong.MaxValue));
+        // The same payload twice in one millisecond is two packets, not a packet and its copy.
+        var seen = new SeenPackets(2);
+        Assert.False(seen.Add(Protocol.Packet(3, v4)));
+        Assert.False(seen.Add(Protocol.Packet(3, v4)));
     }
 }

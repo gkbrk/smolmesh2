@@ -13,6 +13,12 @@ internal static class Protocol
 
     internal static ulong Millis => (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
+    private static int counter;
+
+    // What starts every packet: 48 bits of milliseconds, then a 16-bit counter. No two packets of a
+    // node are alike, so the duplicate filter never takes a repeated IP packet for a copy.
+    internal static ulong Stamp => Millis << 16 | (ushort)Interlocked.Increment(ref counter);
+
     internal static (ulong X, ulong Y) SpeckRound(ulong x, ulong y, ulong key)
     {
         x = unchecked(BitOperations.RotateRight(x, 8) + y) ^ key;
@@ -47,7 +53,7 @@ internal static class Protocol
     internal static byte[] Packet(byte command, ReadOnlySpan<byte> payload, ulong? timestamp = null)
     {
         byte[] result = new byte[9 + payload.Length];
-        BinaryPrimitives.WriteUInt64LittleEndian(result, timestamp ?? Millis);
+        BinaryPrimitives.WriteUInt64LittleEndian(result, timestamp ?? Stamp);
         result[8] = command;
         payload.CopyTo(result.AsSpan(9));
         return result;
@@ -61,8 +67,11 @@ internal static class Protocol
         return null;
     }
 
-    internal static bool Fresh(ulong timestamp, ulong now) =>
-        (timestamp > now ? timestamp - now : now - timestamp) <= 180_000;
+    internal static bool Fresh(ulong stamp, ulong now)
+    {
+        ulong millis = stamp >> 16;
+        return (millis > now ? millis - now : now - millis) <= 180_000;
+    }
 }
 
 // Local-only fingerprints need not match Rust's FxHasher on the wire.

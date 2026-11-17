@@ -88,7 +88,7 @@ pub fn wintun_start(
         let target = crate::ipv6_addr::Addr::from_buf(&packet[24..40]);
 
         let mut packet_builder = Vec::new();
-        packet_builder.extend_from_slice(&crate::millis().to_le_bytes());
+        packet_builder.extend_from_slice(&crate::stamp().to_le_bytes());
         packet_builder.push(3);
         packet_builder.extend_from_slice(&packet);
 

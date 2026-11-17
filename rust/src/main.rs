@@ -36,6 +36,13 @@ fn millis() -> u64 {
   since_epoch.as_millis() as u64
 }
 
+/// What starts every packet: 48 bits of milliseconds, then a 16-bit counter. No two packets of a
+/// node are alike, so the duplicate filter never takes a repeated IP packet for a copy.
+fn stamp() -> u64 {
+  static COUNTER: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+  millis() << 16 | COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u64
+}
+
 async fn run_meshnode(args: &mut VecDeque<String>) {
   let config_path = args.pop_front().expect("meshnode requires a <config-file> argument");
   let config_file =
@@ -70,7 +77,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
     leo_async::spawn(async move {
       loop {
         let mut packet = BytesMut::new();
-        packet.extend_from_slice(&millis().to_le_bytes());
+        packet.extend_from_slice(&stamp().to_le_bytes());
         packet.put_u8(0);
         packet.extend_from_slice(node_name.as_bytes());
 
@@ -91,7 +98,7 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
     leo_async::spawn(async move {
       loop {
         let mut packet = BytesMut::new();
-        packet.extend_from_slice(&millis().to_le_bytes());
+        packet.extend_from_slice(&stamp().to_le_bytes());
         packet.put_u8(2);
         packet.extend_from_slice(&addr);
 
@@ -189,14 +196,14 @@ async fn run_meshnode(args: &mut VecDeque<String>) {
     }
     // crate::log!("Got {:?}", data);
 
-    // First 8 bytes are the milliseconds since epoch
+    // First 8 bytes are the stamp: milliseconds since epoch, shifted over a 16-bit counter
     let ms = u64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]);
 
     // Ignore packets older than 3 minutes
     {
       let ignore_after = 1000 * 60 * 3;
       let current = millis();
-      if current.abs_diff(ms) > ignore_after {
+      if current.abs_diff(ms >> 16) > ignore_after {
         continue;
       }
     }
