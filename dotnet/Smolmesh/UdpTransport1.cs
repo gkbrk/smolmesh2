@@ -208,7 +208,10 @@ internal static class UdpTransport1
             link.Send = SendAsync(socket, peer, link.SendKey, () => link.Remote, token);
         }
         // So that the other side knows the link is up without waiting for mesh traffic.
-        if (answer) SendHello(socket, secret, Answer, ours, link.Remote!);
+        // A lost answer is like any lost datagram: the next hello is answered again.
+        if (answer)
+            try { SendHello(socket, secret, Answer, ours, link.Remote!); }
+            catch (SocketException) { }
     }
 
     // Takes the peer and the address away from a link. Its newest hello stays in ById.
@@ -273,8 +276,7 @@ internal static class UdpTransport1
         Span<byte> id = stackalloc byte[8];
         BinaryPrimitives.WriteUInt64LittleEndian(id, ours);
         Seal(secret.HelloKey, Protocol.Packet(command, id), datagram);
-        try { socket.SendTo(datagram, SocketFlags.None, to); }
-        catch (SocketException) { }
+        socket.SendTo(datagram, SocketFlags.None, to);
     }
 
     // Copies a packet into datagram and enciphers it there, returning the datagram's length. A
