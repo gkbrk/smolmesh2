@@ -128,24 +128,20 @@ internal sealed class MeshNode
         if (!Protocol.Fresh(timestamp, Protocol.Millis) || seen.Add(packet)) return;
         ReadOnlyMemory<byte> payload = packet.AsMemory(9);
         IPAddress? address;
+        string? nodeName = null;
         switch (packet[8])
         {
             case 0:
-                string nodeName;
                 try
                 {
                     nodeName = StrictUtf8.GetString(payload.Span);
                     address = Protocol.NodeAddress(nodeName);
                 }
                 catch (DecoderFallbackException) { return; }
-                // JSON quoting keeps peer-controlled names on one log line.
-                peers[nodeName] = (address, Environment.TickCount64);
-                Log.Information("Received node tracer: {NodeName:l} ({Address})", JsonSerializer.Serialize(nodeName), Protocol.FormatAddress(address));
                 break;
             case 1 when payload.Length == 16:
             case 2 when payload.Length == 4:
                 address = new IPAddress(payload.Span);
-                Log.Information("Received IPv{Version} tracer: {Address}", packet[8] == 1 ? 6 : 4, Protocol.FormatAddress(address));
                 break;
             case 3:
                 address = Protocol.Destination(payload.Span);
@@ -178,7 +174,15 @@ internal sealed class MeshNode
         }
         // A tracer of our own comes back through the mesh; it is not a peer.
         if (ourAddresses.Contains(address)) return;
-        routing.Learn(timestamp, address, peer);
+        // The seen cache forgets under load; an announcement that is not newer must stop here or it loops.
+        if (!routing.Learn(timestamp, address, peer)) return;
+        if (nodeName is not null)
+        {
+            peers[nodeName] = (address, Environment.TickCount64);
+            // JSON quoting keeps peer-controlled names on one log line.
+            Log.Information("Received node tracer: {NodeName:l} ({Address})", JsonSerializer.Serialize(nodeName), Protocol.FormatAddress(address));
+        }
+        else Log.Information("Received IPv{Version} tracer: {Address}", packet[8] == 1 ? 6 : 4, Protocol.FormatAddress(address));
         routing.Broadcast(packet);
         if (tun is not null) routeRequests.Writer.TryWrite(address);
     }

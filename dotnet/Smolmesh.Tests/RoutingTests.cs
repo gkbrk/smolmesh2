@@ -39,8 +39,8 @@ public class RoutingTests
         routes.Add(first);
         routes.Add(second);
         var address = IPAddress.Parse("192.0.2.1");
-        routes.Learn(100, address, first);
-        routes.Learn(100, address, second);
+        Assert.True(routes.Learn(100, address, first));
+        Assert.False(routes.Learn(100, address, second));
         routes.Send(address, [1]);
         Assert.True(first.Outgoing.Reader.TryRead(out _));
         Assert.False(second.Outgoing.Reader.TryRead(out _));

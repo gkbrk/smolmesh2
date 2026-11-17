@@ -72,6 +72,8 @@ public class MeshNodeTests
     {
         var node = new MeshNode(new Configuration { NodeName = "local", ControlPort = 0 });
         var peer = new Peer();
+        var routing = (Routing)typeof(MeshNode).GetField("routing", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(node)!;
+        routing.Add(peer);
         using var output = new StringWriter();
         Logging.Configure();
         TextWriter previous = Console.Error;
@@ -81,6 +83,8 @@ public class MeshNodeTests
             byte[] name = Protocol.Packet(0, "remote\nnode"u8);
             await node.ProcessPacketAsync(name, peer, null, default);
             await node.ProcessPacketAsync(name, peer, null, default);
+            // Not a duplicate packet, but not newer either: what a looping announcement looks like once the seen cache forgot it.
+            await node.ProcessPacketAsync(Protocol.Packet(0, "remote\nnode"u8, BitConverter.ToUInt64(name) - 1), peer, null, default);
             await node.ProcessPacketAsync(Protocol.Packet(1, IPAddress.Parse("fd00::1234").GetAddressBytes()), peer, null, default);
             await node.ProcessPacketAsync(Protocol.Packet(2, IPAddress.Parse("192.0.2.7").GetAddressBytes()), peer, null, default);
             await node.ProcessPacketAsync(Protocol.Packet(0, "stale"u8, 0), peer, null, default);
@@ -95,6 +99,7 @@ public class MeshNodeTests
         finally { Console.SetError(previous); }
         string logs = output.ToString();
         Assert.Equal(3, logs.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length);
+        Assert.Equal(3, peer.Outgoing.Reader.Count); // Only the three learned announcements were rebroadcast.
         Assert.Contains("Received node tracer: \"remote\\nnode\"", logs);
         Assert.Contains(Protocol.FormatAddress(Protocol.NodeAddress("remote\nnode")), logs);
         Assert.Contains("Received IPv6 tracer: fd00:0000:0000:0000:0000:0000:0000:1234", logs);

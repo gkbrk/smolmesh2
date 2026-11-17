@@ -44,13 +44,15 @@ internal sealed class Routing
         peer.Outgoing.Writer.TryComplete();
     }
 
-    internal void Learn(ulong timestamp, IPAddress address, Peer peer)
+    /// <summary>True when the announcement was newer than the stored route and replaced it.</summary>
+    internal bool Learn(ulong timestamp, IPAddress address, Peer peer)
     {
         lock (gate)
         {
-            if (!peers.Contains(peer)) return;
-            if (!routes.TryGetValue(address, out var old) || timestamp > old.Timestamp)
-                routes[address] = (timestamp, peer);
+            if (!peers.Contains(peer)) return false;
+            if (routes.TryGetValue(address, out var old) && timestamp <= old.Timestamp) return false;
+            routes[address] = (timestamp, peer);
+            return true;
         }
     }
 
